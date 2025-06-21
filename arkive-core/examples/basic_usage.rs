@@ -15,8 +15,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manager = WalletManager::new(temp_dir.path()).await?;
 
     println!("Creating wallet...");
-    let (wallet, mnemonic) = manager.create_wallet("example-wallet", Network::Regtest).await?;
-    
+    let (wallet, mnemonic) = manager
+        .create_wallet("example-wallet", Network::Regtest)
+        .await?;
+
     println!("Wallet created!");
     println!("Mnemonic: {}", mnemonic);
     println!("Wallet ID: {}", wallet.id());
@@ -24,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get addresses
     let onchain_addr = wallet.get_onchain_address().await?;
     let ark_addr = wallet.get_ark_address().await?;
-    
+
     println!("\nAddresses:");
     println!("On-chain: {}", onchain_addr.address);
     println!("Ark: {}", ark_addr.address);

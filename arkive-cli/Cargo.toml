@@ -1,0 +1,29 @@
+[package]
+name = "arkive-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line interface for ARKive SDK"
+authors = ["Dikshant <dikshant.073@gmail.com>"]
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "arkive"
+path = "src/main.rs"
+
+[dependencies]
+arkive-core = { path = "../arkive-core" }
+
+# CLI dependencies
+bitcoin = {workspace = true}
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+# Additional CLI dependencies
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5.0"
+comfy-table = "7.0"
+dialoguer = "0.11"

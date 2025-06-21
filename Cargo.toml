@@ -1,0 +1,40 @@
+[workspace]
+members = ["arkive-core", "arkive-cli"]
+resolver = "2"
+
+[workspace.dependencies]
+# Ark
+ark-client = { git = "https://github.com/ArkLabsHQ/ark-rs", rev = "c754d7adc8552b14d9d14ef871df271196089d8f" }
+ark-core = { git = "https://github.com/ArkLabsHQ/ark-rs", rev = "c754d7adc8552b14d9d14ef871df271196089d8f" }
+ark-bdk-wallet = { git = "https://github.com/ArkLabsHQ/ark-rs", rev = "c754d7adc8552b14d9d14ef871df271196089d8f" }
+ark-grpc = { git = "https://github.com/ArkLabsHQ/ark-rs", rev = "c754d7adc8552b14d9d14ef871df271196089d8f" }
+
+# Bitcoin
+bitcoin = { version = "0.32.6", features = ["rand"] }
+bip39 = { version = "2.1.0", features = ["rand"] }
+
+# Async and networking
+tokio = { version = "1.28", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+esplora-client = "0.12.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Storage
+rusqlite = { version = "0.35.0", features = ["bundled"] }
+
+# Utilities
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.17.0", features = ["v4"] }
+hex = "0.4.3"
+chrono = { version = "0.4.40", features = ["serde"] }
+tracing = "0.1"
+parking_lot = { version = "0.12", features = ["send_guard"] }
+tracing-subscriber = "0.3.19"
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+dialoguer = "0.11"

@@ -55,6 +55,19 @@ impl ArkWallet {
         self.config.network
     }
 
+    pub fn is_mutinynet(&self) -> bool {
+        self.config.is_mutinynet
+    }
+
+    pub fn network_display(&self) -> String {
+        if self.config.is_mutinynet {
+            "Mutinynet".to_string()
+        } else {
+            format!("{:?}", self.config.network)
+        }
+    }
+
+
     // Address generation
     pub async fn get_onchain_address(&self) -> Result<Address> {
         let address = self.bitcoin_service.get_address().await?;

@@ -63,9 +63,8 @@ pub async fn handle_wallet_command(cmd: WalletCommands, manager: &WalletManager)
             println!("  Name: {}", wallet.name());
             println!("  ID: {}", wallet.id());
             println!(
-                "  Network: {:?}{}",
-                wallet.network(),
-                if is_mutinynet { " (Mutinynet)" } else { "" }
+                "  Network: {:?}",
+                wallet.network_display()
             );
 
             // Get addresses
@@ -104,9 +103,8 @@ pub async fn handle_wallet_command(cmd: WalletCommands, manager: &WalletManager)
             println!("  Name: {}", wallet.name());
             println!("  ID: {}", wallet.id());
             println!(
-                "  Network: {:?}{}",
-                wallet.network(),
-                if is_mutinynet { " (Mutinynet)" } else { "" }
+                "  Network: {:?}",
+                wallet.network_display()
             );
         }
 
@@ -128,7 +126,7 @@ pub async fn handle_wallet_command(cmd: WalletCommands, manager: &WalletManager)
                     Ok(wallet) => {
                         table.add_row(vec![
                             wallet.name(),
-                            &format!("{:?}", wallet.network()),
+                            &wallet.network_display(),
                             "Available",
                         ]);
                     }
@@ -147,7 +145,7 @@ pub async fn handle_wallet_command(cmd: WalletCommands, manager: &WalletManager)
             println!("Wallet Information:");
             println!("  Name: {}", wallet.name());
             println!("  ID: {}", wallet.id());
-            println!("  Network: {:?}", wallet.network());
+            println!("  Network: {:?}", wallet.network_display());
             println!();
 
             // Get addresses

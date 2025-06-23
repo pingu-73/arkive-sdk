@@ -40,6 +40,14 @@ enum Commands {
     /// Ark-specific commands
     #[command(subcommand)]
     Ark(commands::ArkCommands),
+
+    /// Backup and restore commands
+    #[command(subcommand)]
+    Backup(commands::BackupCommands),
+
+    /// Multi-device sync commands
+    #[command(subcommand)]
+    Sync(commands::SyncCommands),
 }
 
 #[tokio::main]
@@ -75,6 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Transaction(cmd) => commands::handle_transaction_command(cmd, &manager).await,
         Commands::Balance(cmd) => commands::handle_balance_command(cmd, &manager).await,
         Commands::Ark(cmd) => commands::handle_ark_command(cmd, &manager).await,
+        Commands::Backup(cmd) => commands::handle_backup_command(cmd, &manager).await,
+        Commands::Sync(cmd) => commands::handle_sync_command(cmd, &manager).await,
     };
 
     if let Err(e) = result {

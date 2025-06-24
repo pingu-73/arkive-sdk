@@ -61,12 +61,11 @@ impl WalletConfig {
 
         match (network, is_mutinynet) {
             (Network::Signet, true) => {
-                // Mutinynet is an extension of Signet
-                config.esplora_url = "https://mempool.space/signet".to_string();
+                config.esplora_url = "https://mutinynet.com/api".to_string();
                 config.ark_server_url = "https://mutinynet.arkade.sh".to_string();
             }
             (Network::Signet, false) => {
-                config.esplora_url = "https://mempool.space/signet".to_string();
+                config.esplora_url = "https://mempool.space/signet/api".to_string();
                 config.ark_server_url = "https://signet.arkade.sh".to_string();
             }
             (Network::Regtest, _) => {

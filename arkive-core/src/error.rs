@@ -50,6 +50,12 @@ pub enum ArkiveError {
     Dialog(String),
 }
 
+impl From<ark_core::Error> for ArkiveError {
+    fn from(err: ark_core::Error) -> Self {
+        ArkiveError::Ark(err.to_string())
+    }
+}
+
 impl ArkiveError {
     pub fn wallet(msg: impl Into<String>) -> Self {
         Self::Wallet(msg.into())

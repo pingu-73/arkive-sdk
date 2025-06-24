@@ -36,6 +36,12 @@ futures = "0.3.31"
 rand = "0.9.1"
 tempfile = "3.20.0"
 
+# Encryption
+chacha20poly1305 = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+base64 = "0.21"
+
 [dev-dependencies]
 tempfile = "3.20.0"
 tracing-subscriber = "0.3.19"

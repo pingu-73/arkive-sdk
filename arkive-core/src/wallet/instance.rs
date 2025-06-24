@@ -55,6 +55,19 @@ impl ArkWallet {
         self.config.network
     }
 
+    pub fn is_mutinynet(&self) -> bool {
+        self.config.is_mutinynet
+    }
+
+    pub fn network_display(&self) -> String {
+        if self.config.is_mutinynet {
+            "Mutinynet".to_string()
+        } else {
+            format!("{:?}", self.config.network)
+        }
+    }
+
+
     // Address generation
     pub async fn get_onchain_address(&self) -> Result<Address> {
         let address = self.bitcoin_service.get_address().await?;
@@ -150,5 +163,64 @@ impl ArkWallet {
 
     pub async fn estimate_ark_fee(&self, amount: Amount) -> Result<Amount> {
         self.ark_service.estimate_fee(amount).await
+    }
+
+    /// Get backup manager for this wallet
+    pub fn get_backup_manager(&self) -> crate::backup::BackupManager {
+        crate::backup::BackupManager::new(self.storage.clone())
+    }
+
+    /// Get sync manager for this wallet
+    pub fn get_sync_manager(&self) -> crate::sync::SyncManager {
+        crate::sync::SyncManager::new(self.storage.clone())
+    }
+
+    /// Create encrypted backup
+    pub async fn create_backup(&self, password: &str) -> Result<crate::backup::EncryptedBackup> {
+        let backup_manager = self.get_backup_manager();
+        backup_manager.create_backup(&self.id, password).await
+    }
+
+    /// Export backup to file
+    pub async fn export_backup(&self, password: &str, file_path: &str) -> Result<()> {
+        let backup_manager = self.get_backup_manager();
+        backup_manager
+            .export_to_file(&self.id, password, file_path)
+            .await
+    }
+
+    /// Initialize sync for this wallet
+    pub async fn init_sync(&self) -> Result<()> {
+        let sync_manager = self.get_sync_manager();
+        sync_manager.init_sync(&self.id).await
+    }
+
+    /// Create sync package for sharing with other devices
+    pub async fn create_sync_package(&self) -> Result<crate::sync::SyncPackage> {
+        let sync_manager = self.get_sync_manager();
+        sync_manager.create_sync_package(&self.id).await
+    }
+
+    /// Get sync conflicts that need resolution
+    pub async fn get_sync_conflicts(&self) -> Result<Vec<crate::sync::SyncConflict>> {
+        let sync_manager = self.get_sync_manager();
+        sync_manager.get_conflicts(&self.id).await
+    }
+
+    /// Get VTXOs approaching expiry (for proactive management)
+    pub async fn get_expiring_vtxos(
+        &self,
+        hours_threshold: i64,
+    ) -> Result<Vec<crate::storage::vtxo_store::VtxoState>> {
+        let vtxo_store = crate::storage::VtxoStore::new(&self.storage);
+        vtxo_store
+            .get_expiring_vtxos(&self.id, hours_threshold)
+            .await
+    }
+
+    /// Clean up expired VTXOs and old data
+    pub async fn cleanup_expired_data(&self) -> Result<usize> {
+        let vtxo_store = crate::storage::VtxoStore::new(&self.storage);
+        vtxo_store.cleanup_expired(&self.id).await
     }
 }

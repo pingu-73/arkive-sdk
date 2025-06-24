@@ -57,6 +57,7 @@ impl WalletManager {
             created_at: Utc::now(),
             encrypted_seed: self.encrypt_seed(&mnemonic)?,
             config: Some(serde_json::to_string(&config)?),
+            is_mutinynet: false,
         };
 
         // Save to storage
@@ -111,6 +112,7 @@ impl WalletManager {
             created_at: Utc::now(),
             encrypted_seed: self.encrypt_seed(&mnemonic)?,
             config: Some(serde_json::to_string(&config)?),
+            is_mutinynet: true,
         };
 
         // Save to storage
@@ -172,6 +174,7 @@ impl WalletManager {
             created_at: Utc::now(),
             encrypted_seed: self.encrypt_seed(mnemonic)?,
             config: Some(serde_json::to_string(&config)?),
+            is_mutinynet: true,
         };
 
         // Save to storage
@@ -318,6 +321,7 @@ impl WalletManager {
             created_at: Utc::now(),
             encrypted_seed: self.encrypt_seed(mnemonic)?,
             config: Some(serde_json::to_string(&config)?),
+            is_mutinynet: false,
         };
 
         // Save to storage

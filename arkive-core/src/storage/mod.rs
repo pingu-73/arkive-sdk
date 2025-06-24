@@ -43,7 +43,8 @@ impl Storage {
                 network TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 encrypted_seed BLOB NOT NULL,
-                config TEXT
+                config TEXT,
+                is_mutinynet BOOLEAN DEFAULT FALSE
             )",
             [],
         )?;
@@ -84,7 +85,9 @@ impl Storage {
             "CREATE TABLE IF NOT EXISTS vtxo_trees (
                 wallet_id TEXT NOT NULL,
                 batch_id TEXT NOT NULL,
-                tree_data BLOB NOT NULL,
+                commitment_txid TEXT NOT NULL,
+                tree_data TEXT NOT NULL,
+                presigned_transactions TEXT NOT NULL,
                 expiry INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
@@ -103,9 +106,41 @@ impl Storage {
                 expiry INTEGER NOT NULL,
                 batch_id TEXT NOT NULL,
                 address TEXT NOT NULL,
+                tree_path TEXT NOT NULL,
+                exit_transactions TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
+                last_updated INTEGER DEFAULT 0,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
                 PRIMARY KEY (wallet_id, outpoint)
+            )",
+            [],
+        )?;
+
+        // Sync metadata table for multi-device sync
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sync_metadata (
+                wallet_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                last_sync INTEGER NOT NULL,
+                sync_version INTEGER NOT NULL,
+                data_hash TEXT NOT NULL,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id),
+                PRIMARY KEY (wallet_id, device_id)
+            )",
+            [],
+        )?;
+
+        // Sync conflicts table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sync_conflicts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet_id TEXT NOT NULL,
+                conflict_type TEXT NOT NULL,
+                local_data TEXT NOT NULL,
+                remote_data TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                resolved BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id)
             )",
             [],
         )?;

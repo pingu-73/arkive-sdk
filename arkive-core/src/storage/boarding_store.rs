@@ -16,11 +16,9 @@ pub struct BoardingOutputState {
     pub user_pubkey: String,
     pub confirmation_blocktime: Option<DateTime<Utc>>,
     pub is_spent: bool,
-    // pub boarding_output: ark_core::BoardingOutput,    // b'coz BoardingOutput is not searilized
 }
 
 impl BoardingOutputState {
-    // needed to reconstruct BoardingOutput when needed
     pub fn to_boarding_output(
         &self,
         network: bitcoin::Network,

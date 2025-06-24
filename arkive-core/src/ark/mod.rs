@@ -387,7 +387,7 @@ impl ArkService {
 
         // 5. Build redeem transaction
         let mut redeem_psbt = build_redeem_transaction(
-            &[(&address, amount)], // Fixed: added & for borrowing
+            &[(&address, amount)],
             change_address
                 .as_ref()
                 .map(|addr| ArkAddress::decode(addr).expect("Valid change address"))
@@ -486,6 +486,7 @@ impl ArkService {
         Ok(())
     }
 
+    // [TODO] Not working correctly.
     pub async fn participate_in_round(&self) -> Result<Option<String>> {
         let client = self
             .client
@@ -540,7 +541,6 @@ impl ArkService {
                 // Ok(Some(round_id))
 
                 // ---------
-                // Return a real round ID if possible, or None if no real round happened
                 if new_vtxos.is_empty() {
                     tracing::warn!("Round participation claimed success but no VTXOs created");
                     Ok(None)
@@ -671,8 +671,8 @@ impl ArkService {
                         .unwrap_or_else(Utc::now),
                     address: vtxo.address().to_string(),
                     batch_id: format!("batch_{}", outpoint.expire_at),
-                    tree_path: Vec::new(), // TODO: Extract from VTXO tree
-                    exit_transactions: Vec::new(), // TODO: Store exit transactions
+                    tree_path: Vec::new(), // [TODO] Extract from VTXO tree
+                    exit_transactions: Vec::new(), // [TODO] Store exit transactions
                 };
 
                 vtxo_store
@@ -728,21 +728,6 @@ impl ArkService {
         Ok(())
     }
 
-    // pub async fn get_balance(&self) -> Result<(Amount, Amount)> {
-    //     if let Some(client) = &self.client {
-    //         // Get balance from server
-    //         match client.offchain_balance().await {
-    //             Ok(balance) => Ok((balance.confirmed(), balance.pending())),
-    //             Err(_) => {
-    //                 // Fallback to local calculation
-    //                 self.calculate_local_balance().await
-    //             }
-    //         }
-    //     } else {
-    //         // Calculate from local VTXOs
-    //         self.calculate_local_balance().await
-    //     }
-    // }
     pub async fn get_balance(&self) -> Result<(Amount, Amount)> {
         if let Some(client) = &self.client {
             // Get balance from server

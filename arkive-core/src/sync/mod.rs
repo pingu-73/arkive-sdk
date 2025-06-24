@@ -114,7 +114,7 @@ impl SyncManager {
                     last_sync: DateTime::from_timestamp(row.get::<_, i64>(0)?, 0).unwrap_or_else(Utc::now),
                     sync_version: row.get::<_, u32>(1)?,
                     data_hash: row.get::<_, String>(2)?,
-                    pending_changes: Vec::new(), // TODO: Load pending changes
+                    pending_changes: Vec::new(), // [TODO] Load pending changes
                 })
             },
         );
@@ -143,7 +143,7 @@ impl SyncManager {
             sync_version: sync_state.sync_version,
             data_hash: sync_state.data_hash,
             backup_data,
-            changes: Vec::new(), // TODO: Include incremental changes
+            changes: Vec::new(), // [TODO] Include incremental changes
             timestamp: Utc::now(),
         })
     }
@@ -405,7 +405,7 @@ impl SyncManager {
             [conflict_id],
         )?;
 
-        // TODO: Apply the chosen resolution
+        // [TODO] Apply the chosen resolution
         tracing::info!(
             "Resolved conflict {} using {} version",
             conflict_id,

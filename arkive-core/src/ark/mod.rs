@@ -250,14 +250,11 @@ impl ArkService {
 
     async fn connect(&mut self) -> Result<()> {
         let blockchain = Arc::new(EsploraBlockchain::new(&self.config.esplora_url)?);
-        let wallet = Arc::new(ArkWalletImpl::new(
-            self.keypair.clone(),
-            self.config.network,
-        ));
+        let wallet = Arc::new(ArkWalletImpl::new(self.keypair, self.config.network));
 
         let offline_client = OfflineClient::new(
             "arkive-sdk".to_string(),
-            self.keypair.clone(),
+            self.keypair,
             blockchain,
             wallet,
             self.config.ark_server_url.clone(),
@@ -671,7 +668,7 @@ impl ArkService {
                         VtxoStatus::Confirmed
                     },
                     expiry: chrono::DateTime::from_timestamp(outpoint.expire_at, 0)
-                        .unwrap_or_else(|| Utc::now()),
+                        .unwrap_or_else(Utc::now),
                     address: vtxo.address().to_string(),
                     batch_id: format!("batch_{}", outpoint.expire_at),
                     tree_path: Vec::new(), // TODO: Extract from VTXO tree
@@ -708,7 +705,7 @@ impl ArkService {
                     created_at,
                 } => (
                     txid.to_string(),
-                    amount.to_sat() as i64,
+                    amount.to_sat(),
                     created_at,
                     TransactionType::Ark,
                 ),
@@ -719,7 +716,7 @@ impl ArkService {
                     ..
                 } => (
                     txid.to_string(),
-                    amount.to_sat() as i64,
+                    amount.to_sat(),
                     created_at,
                     TransactionType::Ark,
                 ),
@@ -844,7 +841,7 @@ impl ArkService {
                     txid: row.get(0)?,
                     amount: row.get(1)?,
                     timestamp: chrono::DateTime::from_timestamp(row.get::<_, i64>(2)?, 0)
-                        .unwrap_or_else(|| Utc::now()),
+                        .unwrap_or_else(Utc::now),
                     tx_type,
                     status,
                     fee: row

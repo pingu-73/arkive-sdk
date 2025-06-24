@@ -188,7 +188,7 @@ impl BackupManager {
                     address_type: row.get(1)?,
                     derivation_path: row.get(2)?,
                     created_at: DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
-                        .unwrap_or_else(|| Utc::now()),
+                        .unwrap_or_else(Utc::now),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()
@@ -204,7 +204,7 @@ impl BackupManager {
                     txid: row.get(0)?,
                     amount: row.get(1)?,
                     timestamp: DateTime::from_timestamp(row.get::<_, i64>(2)?, 0)
-                        .unwrap_or_else(|| Utc::now()),
+                        .unwrap_or_else(Utc::now),
                     tx_type: row.get(3)?,
                     status: row.get(4)?,
                     fee: row.get(5)?,
@@ -244,7 +244,7 @@ impl BackupManager {
                     commitment_txid: row.get(1)?,
                     tree_data,
                     presigned_transactions: presigned_b64,
-                    expiry: DateTime::from_timestamp(expiry, 0).unwrap_or_else(|| Utc::now()),
+                    expiry: DateTime::from_timestamp(expiry, 0).unwrap_or_else(Utc::now),
                     server_pubkey: "".to_string(), // [TODO] Extract from tree_data
                     user_pubkey: "".to_string(),   // [TODO] Extract from tree_data
                 })
@@ -288,7 +288,7 @@ impl BackupManager {
                     amount: row.get::<_, i64>(1)? as u64,
                     status: row.get(2)?,
                     expiry: DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
-                        .unwrap_or_else(|| Utc::now()),
+                        .unwrap_or_else(Utc::now),
                     address: row.get(4)?,
                     batch_id: row.get(5)?,
                     tree_path,
@@ -303,7 +303,7 @@ impl BackupManager {
             wallet_id: wallet_id.to_string(),
             name,
             network,
-            created_at: DateTime::from_timestamp(created_at, 0).unwrap_or_else(|| Utc::now()),
+            created_at: DateTime::from_timestamp(created_at, 0).unwrap_or_else(Utc::now),
             backup_timestamp: Utc::now(),
             encrypted_seed,
             config,

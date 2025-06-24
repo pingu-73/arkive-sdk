@@ -28,9 +28,9 @@ impl ArkWallet {
         config: WalletConfig,
         storage: Arc<Storage>,
     ) -> Result<Self> {
-        let bitcoin_service = BitcoinService::new(keypair.clone(), config.clone()).await?;
+        let bitcoin_service = BitcoinService::new(keypair, config.clone()).await?;
         let ark_service =
-            ArkService::new(keypair.clone(), config.clone(), storage.clone(), id.clone()).await?;
+            ArkService::new(keypair, config.clone(), storage.clone(), id.clone()).await?;
 
         Ok(Self {
             id,

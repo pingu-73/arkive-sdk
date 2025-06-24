@@ -55,9 +55,11 @@ impl WalletConfig {
     }
 
     pub fn new_with_mutinynet(network: Network, is_mutinynet: bool) -> Self {
-        let mut config = Self::default();
-        config.network = network;
-        config.is_mutinynet = is_mutinynet;
+        let mut config = WalletConfig {
+            network,
+            is_mutinynet,
+            ..Default::default()
+        };
 
         match (network, is_mutinynet) {
             (Network::Signet, true) => {

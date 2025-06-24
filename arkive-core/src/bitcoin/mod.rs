@@ -121,7 +121,7 @@ impl BitcoinService {
                             as i64,
                         0,
                     )
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
                     tx_type: TransactionType::OnChain,
                     status: if tx.status.confirmed {
                         TransactionStatus::Confirmed

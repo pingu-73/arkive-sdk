@@ -1,0 +1,22 @@
+[package]
+name = "arkive-lottery"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-collateral lottery implementation"
+authors = ["Dikshant <dikshant.073@gmail.com>"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+arkive-core = { path = "../arkive-core" }
+bitcoin = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+tracing = { workspace = true }

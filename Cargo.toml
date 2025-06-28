@@ -1,5 +1,5 @@
 [workspace]
-members = ["arkive-core", "arkive-cli"]
+members = ["arkive-core", "arkive-cli", "arkive-lottery", "coinflip-cli"]
 resolver = "2"
 
 [workspace.dependencies]

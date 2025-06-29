@@ -11,35 +11,45 @@ use uuid::Uuid;
 pub enum GameState {
     WaitingForPlayers,
     WaitingForBets,
+    BetsCollected,
     CommitmentPhase,
     RevealPhase,
     Completed { winner: Uuid },
     Aborted { reason: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BetInfo {
+    pub player_id: Uuid,
+    pub amount: Amount,
+    pub txid: String,
+    pub timestamp: DateTime<Utc>,
+}
+
 pub struct TwoPlayerGame {
     id: Uuid,
     bet_amount: Amount,
     state: GameState,
     players: HashMap<Uuid, Player>,
+    pot_wallet: Arc<ArkWallet>, // wallet for the pot
+    collected_bets: HashMap<Uuid, BetInfo>,
     commitment_deadline: Option<DateTime<Utc>>,
     reveal_deadline: Option<DateTime<Utc>>,
-    pot_address: String,
+    total_pot: Amount,
 }
 
 impl TwoPlayerGame {
-    pub async fn new(bet_amount: Amount) -> Result<Self> {
-        let pot_address = format!("game_pot_{}", Uuid::new_v4());
-
+    pub async fn new(bet_amount: Amount, pot_wallet: Arc<ArkWallet>) -> Result<Self> {
         Ok(Self {
             id: Uuid::new_v4(),
             bet_amount,
             state: GameState::WaitingForPlayers,
             players: HashMap::new(),
+            pot_wallet,
+            collected_bets: HashMap::new(),
             commitment_deadline: None,
             reveal_deadline: None,
-            pot_address,
+            total_pot: Amount::ZERO,
         })
     }
 
@@ -59,12 +69,21 @@ impl TwoPlayerGame {
         self.players.len()
     }
 
-    pub fn pot_address(&self) -> &str {
-        &self.pot_address
+    pub async fn get_pot_address(&self) -> Result<String> {
+        let ark_addr = self.pot_wallet.get_ark_address().await?;
+        Ok(ark_addr.address)
+    }
+
+    pub fn total_pot(&self) -> Amount {
+        self.total_pot
     }
 
     pub fn players(&self) -> Vec<Uuid> {
         self.players.keys().cloned().collect()
+    }
+
+    pub fn get_bet_info(&self, player_id: Uuid) -> Option<&BetInfo> {
+        self.collected_bets.get(&player_id)
     }
 
     /// Add a player to the game
@@ -94,19 +113,97 @@ impl TwoPlayerGame {
         Ok(player_id)
     }
 
+    /// Player places their bet
+    pub async fn place_bet(&mut self, player_id: Uuid) -> Result<String> {
+        if !matches!(self.state, GameState::WaitingForBets) {
+            return Err(LotteryError::InvalidState(
+                "Not in betting phase".to_string(),
+            ));
+        }
+
+        // Check if player already placed bet
+        if self.collected_bets.contains_key(&player_id) {
+            return Err(LotteryError::InvalidState(
+                "Player already placed bet".to_string(),
+            ));
+        }
+
+        let player = self
+            .players
+            .get(&player_id)
+            .ok_or(LotteryError::PlayerNotFound(player_id))?;
+
+        // Check player has sufficient balance
+        let balance = player.wallet().balance().await?;
+
+        if balance.confirmed < self.bet_amount {
+            return Err(LotteryError::Internal(format!(
+                "Insufficient balance: need {} sats, have {} sats",
+                self.bet_amount.to_sat(),
+                balance.confirmed.to_sat()
+            )));
+        }
+
+        // Get pot address
+        let pot_address = self.get_pot_address().await?;
+
+        // Send bet to pot
+        let txid = player.place_bet(&pot_address, self.bet_amount).await?;
+
+        // Record the bet
+        let bet_info = BetInfo {
+            player_id,
+            amount: self.bet_amount,
+            txid: txid.clone(),
+            timestamp: Utc::now(),
+        };
+
+        self.collected_bets.insert(player_id, bet_info);
+        self.total_pot += self.bet_amount;
+
+        tracing::info!(
+            "Player {} placed bet of {} sats in game {}: {}",
+            player_id,
+            self.bet_amount.to_sat(),
+            self.id,
+            txid
+        );
+
+        // Check if both players have bet
+        if self.collected_bets.len() == 2 {
+            self.state = GameState::BetsCollected;
+            tracing::info!("All bets collected for game {}", self.id);
+        }
+
+        Ok(txid)
+    }
+
     /// Start the commitment phase after both players have placed bets
     pub async fn start_commitment_phase(&mut self) -> Result<()> {
         if self.players.len() != 2 {
             return Err(LotteryError::GameNotReady);
         }
 
-        if !matches!(self.state, GameState::WaitingForBets) {
+        if !matches!(self.state, GameState::BetsCollected) {
             return Err(LotteryError::InvalidState(
-                "Not ready for commitment phase".to_string(),
+                "Bets not collected yet".to_string(),
             ));
         }
 
-        // commitment deadline 5 minutes from now
+        // Verify pot wallet has received the bets
+        let pot_balance = self.pot_wallet.balance().await?;
+        let expected_pot = self.bet_amount * 2u64;
+
+        if pot_balance.confirmed < expected_pot {
+            tracing::warn!(
+                "Pot balance {} less than expected {}. Waiting for confirmations...",
+                pot_balance.confirmed.to_sat(),
+                expected_pot.to_sat()
+            );
+            // Could wait for confirmations or proceed with pending balance
+        }
+
+        // Set commitment deadline (5 minutes from now)
         self.commitment_deadline = Some(Utc::now() + Duration::minutes(5));
         self.state = GameState::CommitmentPhase;
 
@@ -148,7 +245,7 @@ impl TwoPlayerGame {
 
     /// Start the reveal phase
     async fn start_reveal_phase(&mut self) -> Result<()> {
-        // reveal deadline 5 minutes from now
+        // Set reveal deadline (5 minutes from now)
         self.reveal_deadline = Some(Utc::now() + Duration::minutes(5));
         self.state = GameState::RevealPhase;
 
@@ -186,7 +283,7 @@ impl TwoPlayerGame {
         Ok(())
     }
 
-    /// winner is determined using XOR of revealed secrets
+    /// Determine winner using XOR of revealed secrets
     async fn determine_winner(&mut self) -> Result<()> {
         let player_ids: Vec<Uuid> = self.players.keys().cloned().collect();
         if player_ids.len() != 2 {
@@ -217,32 +314,50 @@ impl TwoPlayerGame {
 
         tracing::info!("Game {} completed. Winner: {}", self.id, winner_id);
 
-        // [TODO] transfer the pot to the winner
+        // Payout the winner
         self.payout_winner(winner_id).await?;
 
         Ok(())
     }
 
-    /// Payout the winner
+    /// Payout the winner with actual Ark transaction
     async fn payout_winner(&self, winner_id: Uuid) -> Result<()> {
-        let total_pot = self.bet_amount * 2u64;
+        let winner = self
+            .players
+            .get(&winner_id)
+            .ok_or(LotteryError::PlayerNotFound(winner_id))?;
+
+        // Get winner's Ark address
+        let winner_address = winner.wallet().get_ark_address().await?;
+
+        // Send entire pot to winner
+        let payout_amount = self.total_pot;
 
         tracing::info!(
-            "Game {} payout: Player {} wins {} sats",
-            self.id,
+            "Paying out {} sats to winner {} at address {}",
+            payout_amount.to_sat(),
             winner_id,
-            total_pot.to_sat()
+            winner_address.address
         );
 
-        // [TODO] Ark Tx to transfer pot to winner
-        // 1. Getting winner's Ark addr
-        // 2. Creating Tx from pot addr to winner
-        // 3. Broadcasting the Tx
+        // Send from pot wallet to winner
+        let txid = self
+            .pot_wallet
+            .send_ark(&winner_address.address, payout_amount)
+            .await?;
+
+        tracing::info!(
+            "Game {} payout completed. Winner {} received {} sats: {}",
+            self.id,
+            winner_id,
+            payout_amount.to_sat(),
+            txid
+        );
 
         Ok(())
     }
 
-    /// Abort the game
+    /// Abort the game and refund bets
     async fn abort_game(&mut self, reason: String) -> Result<()> {
         self.state = GameState::Aborted {
             reason: reason.clone(),
@@ -250,8 +365,41 @@ impl TwoPlayerGame {
 
         tracing::warn!("Game {} aborted: {}", self.id, reason);
 
-        // [TODO] refund
-        // Return bets to players if they were placed
+        // Refund bets to players
+        self.refund_bets().await?;
+
+        Ok(())
+    }
+
+    /// Refund bets to all players
+    async fn refund_bets(&self) -> Result<()> {
+        for (player_id, bet_info) in &self.collected_bets {
+            let player = self
+                .players
+                .get(player_id)
+                .ok_or(LotteryError::PlayerNotFound(*player_id))?;
+
+            let player_address = player.wallet().get_ark_address().await?;
+
+            tracing::info!(
+                "Refunding {} sats to player {} at address {}",
+                bet_info.amount.to_sat(),
+                player_id,
+                player_address.address
+            );
+
+            let txid = self
+                .pot_wallet
+                .send_ark(&player_address.address, bet_info.amount)
+                .await?;
+
+            tracing::info!(
+                "Refunded {} sats to player {}: {}",
+                bet_info.amount.to_sat(),
+                player_id,
+                txid
+            );
+        }
 
         Ok(())
     }
@@ -343,9 +491,10 @@ impl TwoPlayerGame {
             bet_amount: self.bet_amount,
             state: self.state.clone(),
             player_count: self.players.len(),
-            pot_address: self.pot_address.clone(),
+            total_pot: self.total_pot,
             commitment_deadline: self.commitment_deadline,
             reveal_deadline: self.reveal_deadline,
+            collected_bets: self.collected_bets.clone(),
         }
     }
 
@@ -354,7 +503,9 @@ impl TwoPlayerGame {
     }
 
     pub fn can_place_bet(&self, player_id: Uuid) -> bool {
-        matches!(self.state, GameState::WaitingForBets) && self.players.contains_key(&player_id)
+        matches!(self.state, GameState::WaitingForBets)
+            && self.players.contains_key(&player_id)
+            && !self.collected_bets.contains_key(&player_id)
     }
 
     pub fn can_commit(&self, player_id: Uuid) -> bool {
@@ -381,7 +532,8 @@ pub struct GameInfo {
     pub bet_amount: Amount,
     pub state: GameState,
     pub player_count: usize,
-    pub pot_address: String,
+    pub total_pot: Amount,
     pub commitment_deadline: Option<DateTime<Utc>>,
     pub reveal_deadline: Option<DateTime<Utc>>,
+    pub collected_bets: HashMap<Uuid, BetInfo>,
 }

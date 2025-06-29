@@ -32,6 +32,24 @@ pub enum LotteryError {
     #[error("Timeout expired")]
     TimeoutExpired,
 
+    #[error("Bet already placed by player: {0}")]
+    BetAlreadyPlaced(Uuid),
+
+    #[error("Insufficient balance: need {need} sats, have {available} sats")]
+    InsufficientBalance { need: u64, available: u64 },
+
+    #[error("Bet placement failed: {0}")]
+    BetPlacementFailed(String),
+
+    #[error("Payout failed: {0}")]
+    PayoutFailed(String),
+
+    #[error("Refund failed: {0}")]
+    RefundFailed(String),
+
+    #[error("Pot wallet error: {0}")]
+    PotWalletError(String),
+
     #[error("Cryptographic error: {0}")]
     Crypto(String),
 

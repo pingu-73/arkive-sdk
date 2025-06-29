@@ -7,7 +7,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
 #[command(name = "coinflip")]
-#[command(about = "Zero-Collateral Lottery CLI - Phase 1: 2-Player")]
+#[command(about = "Zero-Collateral Lottery CLI 2-player Betting")]
 #[command(version)]
 struct Cli {
     /// Data directory for wallet storage
@@ -36,6 +36,13 @@ enum Commands {
         /// Wallet name to use
         wallet: String,
         /// Game ID to join
+        game_id: String,
+    },
+    /// Place bet in the game
+    Bet {
+        /// Wallet name
+        wallet: String,
+        /// Game ID
         game_id: String,
     },
     /// Commit to a game
@@ -97,6 +104,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Join { wallet, game_id } => {
             commands::join_game(&wallet_manager, &wallet, &game_id).await
+        }
+        Commands::Bet { wallet, game_id } => {
+            commands::place_bet(&wallet_manager, &wallet, &game_id).await
         }
         Commands::Commit { wallet, game_id } => {
             commands::commit_to_game(&wallet_manager, &wallet, &game_id).await

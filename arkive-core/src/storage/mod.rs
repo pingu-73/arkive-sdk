@@ -1,6 +1,8 @@
 #![allow(unused_imports)]
+pub mod boarding_store;
 pub mod vtxo_store;
 pub mod wallet_store;
+pub use boarding_store::{BoardingOutputState, BoardingStore};
 
 pub use vtxo_store::VtxoStore;
 pub use wallet_store::WalletStore;
@@ -110,6 +112,26 @@ impl Storage {
                 exit_transactions TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_updated INTEGER DEFAULT 0,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id),
+                PRIMARY KEY (wallet_id, outpoint)
+            )",
+            [],
+        )?;
+
+        // Boarding output storage
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS boarding_outputs (
+                wallet_id TEXT NOT NULL,
+                outpoint TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                address TEXT NOT NULL,
+                script_pubkey TEXT NOT NULL,
+                exit_delay INTEGER NOT NULL,
+                server_pubkey TEXT NOT NULL,
+                user_pubkey TEXT NOT NULL,
+                confirmation_blocktime INTEGER,
+                is_spent BOOLEAN DEFAULT FALSE,
+                created_at INTEGER NOT NULL,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
                 PRIMARY KEY (wallet_id, outpoint)
             )",

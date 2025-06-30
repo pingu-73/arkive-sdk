@@ -62,10 +62,7 @@ pub async fn handle_wallet_command(cmd: WalletCommands, manager: &WalletManager)
             println!("Wallet Details:");
             println!("  Name: {}", wallet.name());
             println!("  ID: {}", wallet.id());
-            println!(
-                "  Network: {:?}",
-                wallet.network_display()
-            );
+            println!("  Network: {:?}", wallet.network_display());
 
             // Get addresses
             if let Ok(onchain_addr) = wallet.get_onchain_address().await {
@@ -102,10 +99,7 @@ pub async fn handle_wallet_command(cmd: WalletCommands, manager: &WalletManager)
             println!("Wallet imported successfully!");
             println!("  Name: {}", wallet.name());
             println!("  ID: {}", wallet.id());
-            println!(
-                "  Network: {:?}",
-                wallet.network_display()
-            );
+            println!("  Network: {:?}", wallet.network_display());
         }
 
         WalletCommands::List => {
@@ -124,11 +118,7 @@ pub async fn handle_wallet_command(cmd: WalletCommands, manager: &WalletManager)
             for wallet_name in wallets {
                 match manager.load_wallet(&wallet_name).await {
                     Ok(wallet) => {
-                        table.add_row(vec![
-                            wallet.name(),
-                            &wallet.network_display(),
-                            "Available",
-                        ]);
+                        table.add_row(vec![wallet.name(), &wallet.network_display(), "Available"]);
                     }
                     Err(_) => {
                         table.add_row(vec![&wallet_name, "Unknown", "Error"]);
@@ -173,7 +163,7 @@ pub async fn handle_wallet_command(cmd: WalletCommands, manager: &WalletManager)
         WalletCommands::Delete { name, force } => {
             if !force {
                 let confirm = Confirm::new()
-                    .with_prompt(&format!("Are you sure you want to delete wallet '{}'? This action cannot be undone.", name))
+                    .with_prompt(format!("Are you sure you want to delete wallet '{}'? This action cannot be undone.", name))
                     .default(false)
                     .interact()
                     .map_err(|e| ArkiveError::dialog(e.to_string()))?;

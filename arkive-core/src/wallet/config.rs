@@ -55,18 +55,19 @@ impl WalletConfig {
     }
 
     pub fn new_with_mutinynet(network: Network, is_mutinynet: bool) -> Self {
-        let mut config = Self::default();
-        config.network = network;
-        config.is_mutinynet = is_mutinynet;
+        let mut config = WalletConfig {
+            network,
+            is_mutinynet,
+            ..Default::default()
+        };
 
         match (network, is_mutinynet) {
             (Network::Signet, true) => {
-                // Mutinynet is an extension of Signet
-                config.esplora_url = "https://mempool.space/signet".to_string();
+                config.esplora_url = "https://mutinynet.com/api".to_string();
                 config.ark_server_url = "https://mutinynet.arkade.sh".to_string();
             }
             (Network::Signet, false) => {
-                config.esplora_url = "https://mempool.space/signet".to_string();
+                config.esplora_url = "https://mempool.space/signet/api".to_string();
                 config.ark_server_url = "https://signet.arkade.sh".to_string();
             }
             (Network::Regtest, _) => {

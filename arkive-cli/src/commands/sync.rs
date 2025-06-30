@@ -80,7 +80,7 @@ pub async fn handle_sync_command(cmd: SyncCommands, manager: &WalletManager) -> 
             let package_json = tokio::fs::read_to_string(&input).await?;
             let package: arkive_core::sync::SyncPackage = serde_json::from_str(&package_json)?;
 
-            // TODO: Get appropriate wallet instance
+            // [TODO] Get appropriate wallet instance
             println!("Sync package for wallet: {}", package.wallet_id);
             println!("From device: {}", package.device_id);
             println!("Sync version: {}", package.sync_version);
@@ -92,7 +92,7 @@ pub async fn handle_sync_command(cmd: SyncCommands, manager: &WalletManager) -> 
                 .map_err(|e| ArkiveError::dialog(e.to_string()))?;
 
             if confirm {
-                // TODO: Apply sync package
+                // [TODO] Apply sync package
                 println!("Sync package applied successfully!");
             } else {
                 println!("Sync cancelled.");

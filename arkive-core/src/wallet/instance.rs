@@ -28,8 +28,9 @@ impl ArkWallet {
         config: WalletConfig,
         storage: Arc<Storage>,
     ) -> Result<Self> {
-        let bitcoin_service = BitcoinService::new(keypair.clone(), config.clone()).await?;
-        let ark_service = ArkService::new(keypair.clone(), config.clone()).await?;
+        let bitcoin_service = BitcoinService::new(keypair, config.clone()).await?;
+        let ark_service =
+            ArkService::new(keypair, config.clone(), storage.clone(), id.clone()).await?;
 
         Ok(Self {
             id,
@@ -66,7 +67,6 @@ impl ArkWallet {
             format!("{:?}", self.config.network)
         }
     }
-
 
     // Address generation
     pub async fn get_onchain_address(&self) -> Result<Address> {
@@ -118,6 +118,15 @@ impl ArkWallet {
         let ark_address = ArkAddress::decode(address)
             .map_err(|e| ArkiveError::InvalidAddress(format!("Invalid Ark address: {}", e)))?;
 
+        // Check balance before sending
+        let (confirmed, _) = self.ark_service.get_balance().await?;
+        if confirmed < amount {
+            return Err(ArkiveError::InsufficientFunds {
+                need: amount.to_sat(),
+                available: confirmed.to_sat(),
+            });
+        }
+
         self.ark_service.send(ark_address, amount).await
     }
 
@@ -153,6 +162,13 @@ impl ArkWallet {
         // Sync both services
         self.bitcoin_service.sync().await?;
         self.ark_service.sync().await?;
+
+        // Cleanup expired VTXOs after sync
+        let cleaned = self.cleanup_expired_data().await?;
+        if cleaned > 0 {
+            tracing::info!("Cleaned up {} expired VTXOs", cleaned);
+        }
+
         Ok(())
     }
 

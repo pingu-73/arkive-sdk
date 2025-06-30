@@ -65,7 +65,7 @@ impl<'a> WalletStore<'a> {
                 name: row.get(1)?,
                 network,
                 created_at: chrono::DateTime::from_timestamp(row.get(3)?, 0)
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
                 encrypted_seed: row.get(4)?,
                 config: row.get(5)?,
                 is_mutinynet,
@@ -93,7 +93,7 @@ impl<'a> WalletStore<'a> {
                 name: row.get(1)?,
                 network,
                 created_at: chrono::DateTime::from_timestamp(row.get(3)?, 0)
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
                 encrypted_seed: row.get(4)?,
                 config: row.get(5)?,
                 is_mutinynet,

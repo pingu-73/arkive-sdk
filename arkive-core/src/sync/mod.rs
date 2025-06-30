@@ -111,10 +111,10 @@ impl SyncManager {
                 Ok(SyncState {
                     wallet_id: wallet_id.to_string(),
                     device_id: self.device_id.clone(),
-                    last_sync: DateTime::from_timestamp(row.get::<_, i64>(0)?, 0).unwrap_or_else(|| Utc::now()),
+                    last_sync: DateTime::from_timestamp(row.get::<_, i64>(0)?, 0).unwrap_or_else(Utc::now),
                     sync_version: row.get::<_, u32>(1)?,
                     data_hash: row.get::<_, String>(2)?,
-                    pending_changes: Vec::new(), // TODO: Load pending changes
+                    pending_changes: Vec::new(), // [TODO] Load pending changes
                 })
             },
         );
@@ -143,7 +143,7 @@ impl SyncManager {
             sync_version: sync_state.sync_version,
             data_hash: sync_state.data_hash,
             backup_data,
-            changes: Vec::new(), // TODO: Include incremental changes
+            changes: Vec::new(), // [TODO] Include incremental changes
             timestamp: Utc::now(),
         })
     }
@@ -159,14 +159,14 @@ impl SyncManager {
             // Check for conflicts
             if current.data_hash != package.data_hash {
                 tracing::warn!("Data hash mismatch detected, checking for conflicts");
-                conflicts = self.detect_conflicts(&package).await?;
+                conflicts = self.detect_conflicts(package).await?;
             }
         }
 
         if conflicts.is_empty() {
             // No conflicts, apply changes directly
             self.apply_backup_data(&package.backup_data).await?;
-            self.update_sync_metadata(&package).await?;
+            self.update_sync_metadata(package).await?;
             tracing::info!("Applied sync package without conflicts");
         } else {
             // Store conflicts for resolution
@@ -289,7 +289,7 @@ impl SyncManager {
                     amount: row.get::<_, i64>(1)? as u64,
                     status: row.get(2)?,
                     expiry: DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
-                        .unwrap_or_else(|| Utc::now()),
+                        .unwrap_or_else(Utc::now),
                     address: row.get(4)?,
                     batch_id: row.get(5)?,
                     tree_path: Vec::new(), // Simplified for conflict detection
@@ -386,7 +386,7 @@ impl SyncManager {
                             rusqlite::types::Type::Text,
                         )
                     })?,
-                    timestamp: DateTime::from_timestamp(timestamp, 0).unwrap_or_else(|| Utc::now()),
+                    timestamp: DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now),
                     resolved: false,
                 })
             })?
@@ -405,7 +405,7 @@ impl SyncManager {
             [conflict_id],
         )?;
 
-        // TODO: Apply the chosen resolution
+        // [TODO] Apply the chosen resolution
         tracing::info!(
             "Resolved conflict {} using {} version",
             conflict_id,

@@ -1,0 +1,32 @@
+[package]
+name = "coinflip-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for Zero-Collateral Lottery"
+authors = ["Dikshant <dikshant.073@gmail.com>"]
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "coinflip"
+path = "src/main.rs"
+
+[dependencies]
+arkive-core = { path = "../arkive-core" }
+arkive-lottery = { path = "../arkive-lottery" }
+
+bitcoin = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5.0"
+comfy-table = "7.0"
+dialoguer = "0.11"
+lazy_static = "1.4"
+hex = "0.4"

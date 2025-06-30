@@ -263,6 +263,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkive-lottery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arkive-core",
+ "bitcoin",
+ "chrono",
+ "hex",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -691,6 +710,29 @@ name = "clap_lex"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
+
+[[package]]
+name = "coinflip-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arkive-core",
+ "arkive-lottery",
+ "bitcoin",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "dialoguer",
+ "dirs",
+ "hex",
+ "lazy_static",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "colorchoice"
@@ -3172,6 +3214,7 @@ checksum = "3cf4199d1e5d15ddd86a694e4d0dffa9c323ce759fea589f00fef9d81cc1931d"
 dependencies = [
  "getrandom 0.3.3",
  "js-sys",
+ "serde",
  "wasm-bindgen",
 ]
 

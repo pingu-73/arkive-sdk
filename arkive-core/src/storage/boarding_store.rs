@@ -140,14 +140,75 @@ impl<'a> BoardingStore<'a> {
         outpoint: &OutPoint,
     ) -> Result<()> {
         let conn = self.storage.get_connection().await;
-
-        conn.execute(
+    
+        let result = conn.execute(
             "UPDATE boarding_outputs SET is_spent = TRUE WHERE wallet_id = ?1 AND outpoint = ?2",
             params![wallet_id, outpoint.to_string()],
         )?;
-
+        
+        if result == 0 {
+            tracing::warn!(
+                "No boarding output found to mark as spent: {} for wallet {}",
+                outpoint,
+                wallet_id
+            );
+        } else {
+            tracing::info!(
+                "Marked boarding output {} as spent for wallet {}",
+                outpoint,
+                wallet_id
+            );
+        }
+    
         Ok(())
     }
+    
+    pub async fn load_unspent_boarding_outputs(&self, wallet_id: &str) -> Result<Vec<BoardingOutputState>> {
+        let conn = self.storage.get_connection().await;
+    
+        let mut stmt = conn.prepare(
+            "SELECT outpoint, amount, address, script_pubkey, exit_delay, 
+                    server_pubkey, user_pubkey, confirmation_blocktime, is_spent
+             FROM boarding_outputs 
+             WHERE wallet_id = ?1 AND is_spent = FALSE AND confirmation_blocktime IS NOT NULL
+             ORDER BY created_at DESC",
+        )?;
+    
+        let boarding_iter = stmt.query_map(params![wallet_id], |row| {
+            let outpoint_str: String = row.get(0)?;
+            let amount_sats: i64 = row.get(1)?;
+            let exit_delay: i64 = row.get(4)?;
+            let confirmation_blocktime: Option<i64> = row.get(7)?;
+    
+            let outpoint = OutPoint::from_str(&outpoint_str).map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    0,
+                    "outpoint".to_string(),
+                    rusqlite::types::Type::Text,
+                )
+            })?;
+    
+            Ok(BoardingOutputState {
+                outpoint,
+                amount: Amount::from_sat(amount_sats as u64),
+                address: row.get(2)?,
+                script_pubkey: row.get(3)?,
+                exit_delay: exit_delay as u32,
+                server_pubkey: row.get(5)?,
+                user_pubkey: row.get(6)?,
+                confirmation_blocktime: confirmation_blocktime
+                    .and_then(|t| DateTime::from_timestamp(t, 0)),
+                is_spent: row.get(8)?,
+            })
+        })?;
+    
+        let mut boarding_outputs = Vec::new();
+        for boarding in boarding_iter {
+            boarding_outputs.push(boarding?);
+        }
+    
+        Ok(boarding_outputs)
+    }    
 }
 
 use std::str::FromStr;

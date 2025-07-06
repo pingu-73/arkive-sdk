@@ -657,9 +657,7 @@ impl ArkService {
             }
         }
 
-        Err(ArkiveError::ark(
-            "Round participation failed after all attempts".to_string(),
-        ))
+        unreachable!("Loop always returns")
     }
 
     async fn force_sync_with_server(&self) -> Result<()> {

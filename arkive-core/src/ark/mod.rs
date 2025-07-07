@@ -183,10 +183,13 @@ impl ark_client::wallet::BoardingWallet for ArkWalletImpl {
                         ))
                     })?;
 
-                let mut boarding_outputs = Vec::new();
+                // CRITICAL: Group by script and only return ONE boarding output per unique script
+                let mut script_to_boarding: std::collections::HashMap<String, ark_core::BoardingOutput> = 
+                    std::collections::HashMap::new();
+                let mut total_amount_per_script: std::collections::HashMap<String, bitcoin::Amount> = 
+                    std::collections::HashMap::new();
 
                 for state in boarding_states {
-                    // Use stored params
                     let boarding_output = state.to_boarding_output(self.network).map_err(|e| {
                         ark_client::Error::wallet(anyhow::anyhow!(
                             "Failed to recreate boarding output: {}",
@@ -194,20 +197,45 @@ impl ark_client::wallet::BoardingWallet for ArkWalletImpl {
                         ))
                     })?;
 
-                    // Verify addr
-                    if boarding_output.address().to_string() == state.address {
-                        boarding_outputs.push(boarding_output);
-                        tracing::debug!("Successfully loaded boarding output: {}", state.outpoint);
-                    } else {
+                    if boarding_output.address().to_string() != state.address {
                         tracing::error!("Address mismatch for boarding output: {}", state.outpoint);
-                        tracing::error!("Expected: {}", state.address);
-                        tracing::error!("Got: {}", boarding_output.address());
-                        // Don't include mismatched boarding outputs
+                        continue;
+                    }
+
+                    let script_key = state.script_pubkey.clone();
+                    
+                    // Accumulate amounts for the same script
+                    *total_amount_per_script.entry(script_key.clone()).or_insert(bitcoin::Amount::ZERO) += state.amount;
+                    
+                    // Only keep one boarding output per script (we'll modify its amount later)
+                    if !script_to_boarding.contains_key(&script_key) {
+                        script_to_boarding.insert(script_key.clone(), boarding_output);
+                        tracing::debug!("Added boarding output for script: {}", script_key);
+                    } else {
+                        tracing::debug!("Aggregating amount for existing script: {}", script_key);
                     }
                 }
 
-                tracing::info!("Loaded {} valid boarding outputs", boarding_outputs.len());
-                Ok(boarding_outputs)
+                // WORKAROUND: Since we can't modify the boarding output amount directly,
+                // we need to work around the ark-rs limitations
+                // For now, we'll only return ONE boarding output per script to prevent duplicates
+                let mut final_boarding_outputs = Vec::new();
+                
+                for (script_key, boarding_output) in script_to_boarding {
+                    let total_amount = total_amount_per_script[&script_key];
+                    tracing::info!(
+                        "Boarding script {} has total amount: {} sats across multiple UTXOs", 
+                        script_key, 
+                        total_amount.to_sat()
+                    );
+                    
+                    // For now, only include one boarding output per script
+                    // The ark-rs lib should handle multiple UTXOs to the same script correctly
+                    final_boarding_outputs.push(boarding_output);
+                }
+
+                tracing::info!("Returning {} unique boarding outputs (deduplicated by script)", final_boarding_outputs.len());
+                Ok(final_boarding_outputs)
             })
         })
     }
@@ -557,6 +585,32 @@ impl ArkService {
             .load_unspent_boarding_outputs(&self.wallet_id)
             .await?;
 
+        tracing::debug!("=== ROUND PARTICIPATION DEBUG ===");
+        tracing::debug!("VTXOs: {}", vtxos.len());
+        tracing::debug!("Local boarding states: {}", boarding_states.len());
+        // Simulate what get_boarding_outputs will return
+        let mut simulated_boarding_outputs = Vec::new();
+        let mut script_to_boarding: std::collections::HashMap<String, ark_core::BoardingOutput> = 
+            std::collections::HashMap::new();
+
+        for state in &boarding_states {
+            if let Ok(boarding_output) = state.to_boarding_output(self.config.network) {
+                let script_key = state.script_pubkey.clone();
+                if !script_to_boarding.contains_key(&script_key) {
+                    script_to_boarding.insert(script_key.clone(), boarding_output.clone());
+                    simulated_boarding_outputs.push(boarding_output);
+                    tracing::debug!("  Will provide boarding output: {} (script: {})", 
+                        state.outpoint, script_key);
+                } else {
+                    tracing::debug!("  Skipping duplicate script: {} (outpoint: {})", 
+                        script_key, state.outpoint);
+                }
+            }
+        }
+
+        tracing::debug!("Wallet will provide {} unique boarding outputs to ark-rs", simulated_boarding_outputs.len());
+        tracing::debug!("=== END DEBUG ===");
+
         if vtxos.is_empty() && boarding_states.is_empty() {
             tracing::info!("No VTXOs or boarding outputs to settle");
             return Ok(None);
@@ -619,6 +673,12 @@ impl ArkService {
                                 .mark_boarding_output_spent(&self.wallet_id, &state.outpoint)
                                 .await?;
 
+                            // Update boarding transaction status to confirmed
+                            self.update_transaction_status(
+                                &state.outpoint.txid.to_string(),
+                                TransactionStatus::Confirmed,
+                            )
+                            .await?;
                             tracing::info!("Marked boarding output {} as spent", state.outpoint);
                         }
 
@@ -658,6 +718,22 @@ impl ArkService {
         }
 
         unreachable!("Loop always returns")
+    }
+
+    async fn update_transaction_status(
+        &self,
+        txid: &str,
+        new_status: TransactionStatus,
+    ) -> Result<()> {
+        let conn = self.storage.get_connection().await;
+
+        conn.execute(
+            "UPDATE transactions SET status = ?1 WHERE wallet_id = ?2 AND txid = ?3",
+            rusqlite::params![serde_json::to_string(&new_status)?, self.wallet_id, txid],
+        )?;
+
+        tracing::debug!("Updated transaction {} status to {:?}", txid, new_status);
+        Ok(())
     }
 
     async fn force_sync_with_server(&self) -> Result<()> {
@@ -777,43 +853,47 @@ impl ArkService {
             .client
             .as_ref()
             .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
-
-        // Get boarding address from the client (this uses correct parameters)
+    
         let boarding_address = self.get_boarding_address().await?;
         let address = bitcoin::Address::from_str(&boarding_address)
             .map_err(|e| ArkiveError::internal(format!("Invalid boarding address: {}", e)))?
             .assume_checked();
-
-        // Use blockchain client to find UTXOs at boarding address
+    
         let blockchain = Arc::new(EsploraBlockchain::new(&self.config.esplora_url)?);
         let utxos = blockchain
             .find_outpoints(&address)
             .await
             .map_err(|e| ArkiveError::ark(format!("Failed to find boarding outputs: {}", e)))?;
-
+    
         let boarding_store = BoardingStore::new(&self.storage);
-
-        // Store confirmed, unspent boarding outputs
+        
+        // Get existing boarding outputs to avoid duplicates
+        let existing_outpoints: std::collections::HashSet<String> = boarding_store
+            .load_boarding_outputs(&self.wallet_id)
+            .await?
+            .into_iter()
+            .map(|state| state.outpoint.to_string())
+            .collect();
+    
+        let mut new_boarding_count = 0;
+        
         for utxo in utxos {
+            // Skip if already stored
+            if existing_outpoints.contains(&utxo.outpoint.to_string()) {
+                continue;
+            }
+            
             if !utxo.is_spent && utxo.confirmation_blocktime.is_some() {
                 let server_pk = client.server_info.pk.x_only_public_key().0;
                 let (user_pk, _) = self.keypair.x_only_public_key();
-
-                // CRITICAL: Use the SAME exit delay that the server used to create the boarding address
-                // This should match what's in the boarding descriptor template
                 let exit_delay = client.server_info.boarding_exit_delay.to_consensus_u32();
-
-                tracing::info!(
-                    "Using exit delay from server info: {} (not hardcoded value)",
-                    exit_delay
-                );
-
+    
                 let boarding_state = BoardingOutputState {
                     outpoint: utxo.outpoint,
                     amount: utxo.amount,
                     address: boarding_address.clone(),
                     script_pubkey: address.script_pubkey().to_hex_string(),
-                    exit_delay, // Use server's unilateral exit delay, not boarding exit delay
+                    exit_delay,
                     server_pubkey: server_pk.to_string(),
                     user_pubkey: user_pk.to_string(),
                     confirmation_blocktime: utxo
@@ -822,20 +902,26 @@ impl ArkService {
                     is_spent: false,
                     is_mutinynet: self.config.is_mutinynet,
                 };
-
+    
                 boarding_store
                     .save_boarding_output(&self.wallet_id, &boarding_state)
                     .await?;
-
+    
+                new_boarding_count += 1;
                 tracing::info!(
-                    "Detected and stored boarding output: {} with {} sats (exit_delay: {})",
+                    "Detected and stored NEW boarding output: {} with {} sats",
                     utxo.outpoint,
-                    utxo.amount.to_sat(),
-                    boarding_state.exit_delay
+                    utxo.amount.to_sat()
                 );
             }
         }
-
+    
+        if new_boarding_count > 0 {
+            tracing::info!("Detected {} new boarding outputs", new_boarding_count);
+        } else {
+            tracing::debug!("No new boarding outputs detected");
+        }
+    
         Ok(())
     }
 

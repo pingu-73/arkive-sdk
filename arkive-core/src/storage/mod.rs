@@ -131,6 +131,7 @@ impl Storage {
                 user_pubkey TEXT NOT NULL,
                 confirmation_blocktime INTEGER,
                 is_spent BOOLEAN DEFAULT FALSE,
+                is_mutinynet BOOLEAN DEFAULT FALSE,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
                 PRIMARY KEY (wallet_id, outpoint)

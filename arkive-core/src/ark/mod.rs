@@ -127,11 +127,23 @@ impl Blockchain for EsploraBlockchain {
 pub struct ArkWalletImpl {
     keypair: Keypair,
     network: Network,
+    storage: Arc<Storage>,
+    wallet_id: String,
 }
 
 impl ArkWalletImpl {
-    pub fn new(keypair: Keypair, network: Network) -> Self {
-        Self { keypair, network }
+    pub fn new(
+        keypair: Keypair,
+        network: Network,
+        storage: Arc<Storage>,
+        wallet_id: String,
+    ) -> Self {
+        Self {
+            keypair,
+            network,
+            storage,
+            wallet_id,
+        }
     }
 }
 
@@ -158,8 +170,46 @@ impl ark_client::wallet::BoardingWallet for ArkWalletImpl {
     fn get_boarding_outputs(
         &self,
     ) -> std::result::Result<Vec<ark_core::BoardingOutput>, ark_client::Error> {
-        // [TODO] this would load from storage
-        Ok(Vec::new())
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let boarding_store = BoardingStore::new(&self.storage);
+                let boarding_states = boarding_store
+                    .load_unspent_boarding_outputs(&self.wallet_id)
+                    .await
+                    .map_err(|e| {
+                        ark_client::Error::wallet(anyhow::anyhow!(
+                            "Failed to load boarding outputs: {}",
+                            e
+                        ))
+                    })?;
+
+                let mut boarding_outputs = Vec::new();
+
+                for state in boarding_states {
+                    // Use stored params
+                    let boarding_output = state.to_boarding_output(self.network).map_err(|e| {
+                        ark_client::Error::wallet(anyhow::anyhow!(
+                            "Failed to recreate boarding output: {}",
+                            e
+                        ))
+                    })?;
+
+                    // Verify addr
+                    if boarding_output.address().to_string() == state.address {
+                        boarding_outputs.push(boarding_output);
+                        tracing::debug!("Successfully loaded boarding output: {}", state.outpoint);
+                    } else {
+                        tracing::error!("Address mismatch for boarding output: {}", state.outpoint);
+                        tracing::error!("Expected: {}", state.address);
+                        tracing::error!("Got: {}", boarding_output.address());
+                        // Don't include mismatched boarding outputs
+                    }
+                }
+
+                tracing::info!("Loaded {} valid boarding outputs", boarding_outputs.len());
+                Ok(boarding_outputs)
+            })
+        })
     }
 
     fn sign_for_pk(
@@ -236,8 +286,8 @@ impl ArkService {
             client: None,
             keypair,
             config,
-            storage,
-            wallet_id,
+            storage: storage.clone(),
+            wallet_id: wallet_id.clone(),
         };
 
         // Try to connect to Ark server
@@ -250,7 +300,12 @@ impl ArkService {
 
     async fn connect(&mut self) -> Result<()> {
         let blockchain = Arc::new(EsploraBlockchain::new(&self.config.esplora_url)?);
-        let wallet = Arc::new(ArkWalletImpl::new(self.keypair, self.config.network));
+        let wallet = Arc::new(ArkWalletImpl::new(
+            self.keypair,
+            self.config.network,
+            self.storage.clone(),
+            self.wallet_id.clone(),
+        ));
 
         let offline_client = OfflineClient::new(
             "arkive-sdk".to_string(),
@@ -486,21 +541,23 @@ impl ArkService {
         Ok(())
     }
 
-    // [TODO] Not working correctly.
     pub async fn participate_in_round(&self) -> Result<Option<String>> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
 
-        // First, sync to detect any new boarding outputs
+        // Sync to detect any new boarding outputs
         self.detect_and_store_boarding_outputs().await?;
 
-        // Check if we have any VTXOs or boarding outputs to settle
+        // Get spendable VTXOs and boarding outputs
         let vtxos = self.get_spendable_vtxos().await?;
-        let boarding_outputs = self.get_boarding_outputs().await?;
+        let boarding_store = BoardingStore::new(&self.storage);
+        let boarding_states = boarding_store
+            .load_unspent_boarding_outputs(&self.wallet_id)
+            .await?;
 
-        if vtxos.is_empty() && boarding_outputs.is_empty() {
+        if vtxos.is_empty() && boarding_states.is_empty() {
             tracing::info!("No VTXOs or boarding outputs to settle");
             return Ok(None);
         }
@@ -508,157 +565,153 @@ impl ArkService {
         tracing::info!(
             "Participating in round with {} VTXOs and {} boarding outputs",
             vtxos.len(),
-            boarding_outputs.len()
+            boarding_states.len()
         );
+
+        // Validate boarding outputs before participating
+        let mut valid_boarding_count = 0;
+        for state in &boarding_states {
+            if let Ok(boarding_output) = state.to_boarding_output(self.config.network) {
+                if boarding_output.address().to_string() == state.address {
+                    valid_boarding_count += 1;
+                } else {
+                    tracing::error!("Invalid boarding output detected: {}", state.outpoint);
+                    tracing::error!(
+                        "  Address mismatch - stored: {}, recreated: {}",
+                        state.address,
+                        boarding_output.address()
+                    );
+                }
+            }
+        }
+
+        if valid_boarding_count == 0 && vtxos.is_empty() {
+            return Err(ArkiveError::internal(
+                "No valid boarding outputs or VTXOs found",
+            ));
+        }
 
         let mut rng = StdRng::from_entropy();
 
-        tracing::info!("Calling client.board()...");
-        match client.board(&mut rng).await {
-            Ok(_) => {
-                tracing::info!("client.board() returned success");
-                // Check if we actually got VTXOs
-                let new_vtxos = client.spendable_vtxos().await.map_err(|e| {
-                    ArkiveError::ark(format!("Failed to get VTXOs after round: {}", e))
-                })?;
+        // Retry logic with exponential backoff
+        for attempt in 1..=3 {
+            tracing::info!("Round participation attempt {}", attempt);
 
-                tracing::info!("VTXOs after round: {}", new_vtxos.len());
-                // --------
-                // // Mark boarding outputs as spent
-                // #[allow(unused_variables)]
-                // let boarding_store = BoardingStore::new(&self.storage);
-                // #[allow(unused_variables)]
-                // for boarding_output in &boarding_outputs {
-                //     // Extract outpoint from boarding output (you may need to store this)
-                //     // For now, we'll mark all as potentially spent and let sync clean up
-                // }
+            match client.board(&mut rng).await {
+                Ok(_) => {
+                    tracing::info!("Round participation successful");
 
-                // Sync with server to get updated state
-                self.sync_with_server().await?;
+                    // Wait for server processing
+                    let wait_time = std::cmp::min(5 + (attempt - 1) * 2, 10);
+                    tracing::info!("Waiting {} seconds for server processing...", wait_time);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(wait_time)).await;
 
-                // let round_id = format!("round_{}", Utc::now().timestamp());
-                // tracing::info!("Successfully participated in round: {}", round_id);
-                // Ok(Some(round_id))
+                    // Force sync to get new VTXOs
+                    self.force_sync_with_server().await?;
 
-                // ---------
-                if new_vtxos.is_empty() {
-                    tracing::warn!("Round participation claimed success but no VTXOs created");
-                    Ok(None)
-                } else {
-                    let round_id = format!("round_{}", Utc::now().timestamp());
-                    tracing::info!("Successfully participated in round: {}", round_id);
-                    Ok(Some(round_id))
+                    // Verify success by checking for new VTXOs
+                    let new_vtxos = self.get_spendable_vtxos().await?;
+
+                    if !new_vtxos.is_empty() {
+                        // Mark boarding outputs as spent
+                        for state in &boarding_states {
+                            boarding_store
+                                .mark_boarding_output_spent(&self.wallet_id, &state.outpoint)
+                                .await?;
+
+                            // Update boarding transaction status to confirmed
+                            self.update_transaction_status(
+                                &state.outpoint.txid.to_string(),
+                                TransactionStatus::Confirmed,
+                            )
+                            .await?;
+
+                            tracing::info!("Marked boarding output {} as spent", state.outpoint);
+                        }
+
+                        let round_id = format!("round_{}", chrono::Utc::now().timestamp());
+                        tracing::info!("Successfully participated in round: {}", round_id);
+                        return Ok(Some(round_id));
+                    } else if attempt < 3 {
+                        tracing::warn!("No VTXOs created yet, retrying...");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        continue;
+                    } else {
+                        tracing::warn!("Round participation completed but no VTXOs created");
+                        return Ok(None);
+                    }
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    if error_msg.contains("No boarding outputs")
+                        || error_msg.contains("No VTXOs")
+                        || error_msg.contains("no inputs")
+                    {
+                        tracing::info!("No round participation needed: {}", error_msg);
+                        return Ok(None);
+                    } else if attempt < 3 {
+                        tracing::warn!("Round participation failed (attempt {}): {}", attempt, e);
+                        let backoff = 2_u64.pow((attempt - 1) as u32);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                        continue;
+                    } else {
+                        return Err(ArkiveError::ark(format!(
+                            "Round participation failed after {} attempts: {}",
+                            attempt, e
+                        )));
+                    }
                 }
             }
-            Err(e) => {
-                let error_msg = e.to_string();
-                if error_msg.contains("No boarding outputs")
-                    || error_msg.contains("No VTXOs")
-                    || error_msg.contains("no inputs")
-                {
-                    tracing::info!("No round participation needed: {}", error_msg);
-                    Ok(None)
-                } else {
-                    Err(ArkiveError::ark(format!(
-                        "Round participation failed: {}",
-                        e
-                    )))
-                }
-            }
         }
+
+        unreachable!("Loop always returns")
     }
 
-    async fn get_boarding_outputs(&self) -> Result<Vec<ark_core::BoardingOutput>> {
-        let boarding_store = BoardingStore::new(&self.storage);
-        let boarding_states = boarding_store
-            .load_boarding_outputs(&self.wallet_id)
-            .await?;
+    async fn update_transaction_status(
+        &self,
+        txid: &str,
+        new_status: TransactionStatus,
+    ) -> Result<()> {
+        let conn = self.storage.get_connection().await;
 
-        let mut boarding_outputs = Vec::new();
-        for state in boarding_states {
-            let boarding_output = state.to_boarding_output(self.config.network)?;
-            boarding_outputs.push(boarding_output);
-        }
+        conn.execute(
+            "UPDATE transactions SET status = ?1 WHERE wallet_id = ?2 AND txid = ?3",
+            rusqlite::params![serde_json::to_string(&new_status)?, self.wallet_id, txid],
+        )?;
 
-        Ok(boarding_outputs)
-    }
-
-    async fn detect_and_store_boarding_outputs(&self) -> Result<()> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
-
-        // Get boarding address
-        let boarding_address = self.get_boarding_address().await?;
-        let address = bitcoin::Address::from_str(&boarding_address)
-            .map_err(|e| ArkiveError::internal(format!("Invalid boarding address: {}", e)))?
-            .assume_checked();
-
-        // Use blockchain client to find UTXOs at boarding address
-        let blockchain = Arc::new(EsploraBlockchain::new(&self.config.esplora_url)?);
-        let utxos = blockchain
-            .find_outpoints(&address)
-            .await
-            .map_err(|e| ArkiveError::ark(format!("Failed to find boarding outputs: {}", e)))?;
-
-        let boarding_store = BoardingStore::new(&self.storage);
-
-        // Store confirmed, unspent boarding outputs
-        for utxo in utxos {
-            if !utxo.is_spent && utxo.confirmation_blocktime.is_some() {
-                let server_pk = client.server_info.pk.x_only_public_key().0;
-                let (user_pk, _) = self.keypair.x_only_public_key();
-
-                let boarding_state = BoardingOutputState {
-                    outpoint: utxo.outpoint,
-                    amount: utxo.amount,
-                    address: boarding_address.clone(),
-                    script_pubkey: address.script_pubkey().to_hex_string(),
-                    exit_delay: client.server_info.unilateral_exit_delay.to_consensus_u32(),
-                    server_pubkey: server_pk.to_string(),
-                    user_pubkey: user_pk.to_string(),
-                    confirmation_blocktime: utxo
-                        .confirmation_blocktime
-                        .and_then(|t| DateTime::from_timestamp(t as i64, 0)),
-                    is_spent: false,
-                };
-
-                boarding_store
-                    .save_boarding_output(&self.wallet_id, &boarding_state)
-                    .await?;
-
-                tracing::info!(
-                    "Detected and stored boarding output: {} with {} sats",
-                    utxo.outpoint,
-                    utxo.amount.to_sat()
-                );
-            }
-        }
-
+        tracing::debug!("Updated transaction {} status to {:?}", txid, new_status);
         Ok(())
     }
 
-    pub async fn sync_with_server(&self) -> Result<()> {
+    async fn force_sync_with_server(&self) -> Result<()> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
 
-        // 1. Detect and store boarding outputs
-        self.detect_and_store_boarding_outputs().await?;
-
-        // 2. Get current VTXOs from server
+        // Get current VTXOs from server
         let server_vtxos = client
             .spendable_vtxos()
             .await
             .map_err(|e| ArkiveError::ark(format!("Failed to get VTXOs from server: {}", e)))?;
 
-        // 3. Update local VTXO storage
+        // Update local VTXO storage
         let vtxo_store = VtxoStore::new(&self.storage);
 
+        // Get existing VTXOs to avoid duplicates
+        let existing_vtxos = self.get_all_vtxos().await?;
+        let existing_outpoints: std::collections::HashSet<String> =
+            existing_vtxos.iter().map(|v| v.outpoint.clone()).collect();
+
+        // Process server VTXOs
+        let mut new_vtxo_count = 0;
         for (outpoints, vtxo) in server_vtxos {
             for outpoint in outpoints {
+                // Skip if we already have this VTXO
+                if existing_outpoints.contains(&outpoint.outpoint.to_string()) {
+                    continue;
+                }
+
                 let vtxo_state = VtxoState {
                     outpoint: outpoint.outpoint.to_string(),
                     amount: outpoint.amount,
@@ -678,10 +731,23 @@ impl ArkService {
                 vtxo_store
                     .save_vtxo_state(&self.wallet_id, &vtxo_state)
                     .await?;
+
+                new_vtxo_count += 1;
+                tracing::info!(
+                    "Added new VTXO from server: {} with {} sats (status: {:?})",
+                    vtxo_state.outpoint,
+                    vtxo_state.amount.to_sat(),
+                    vtxo_state.status
+                );
             }
         }
 
-        // 4. Get and store transaction history
+        tracing::info!(
+            "Added {} new VTXOs from server during force sync",
+            new_vtxo_count
+        );
+
+        // Update tx history
         let history = client
             .transaction_history()
             .await
@@ -724,6 +790,83 @@ impl ArkService {
 
             self.record_transaction(&txid, amount, tx_type).await?;
         }
+
+        tracing::info!("Forced sync completed for wallet {}", self.wallet_id);
+        Ok(())
+    }
+
+    async fn detect_and_store_boarding_outputs(&self) -> Result<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
+
+        // Get boarding address from the client (this uses correct parameters)
+        let boarding_address = self.get_boarding_address().await?;
+        let address = bitcoin::Address::from_str(&boarding_address)
+            .map_err(|e| ArkiveError::internal(format!("Invalid boarding address: {}", e)))?
+            .assume_checked();
+
+        // Use blockchain client to find UTXOs at boarding address
+        let blockchain = Arc::new(EsploraBlockchain::new(&self.config.esplora_url)?);
+        let utxos = blockchain
+            .find_outpoints(&address)
+            .await
+            .map_err(|e| ArkiveError::ark(format!("Failed to find boarding outputs: {}", e)))?;
+
+        let boarding_store = BoardingStore::new(&self.storage);
+
+        // Store confirmed, unspent boarding outputs
+        for utxo in utxos {
+            if !utxo.is_spent && utxo.confirmation_blocktime.is_some() {
+                let server_pk = client.server_info.pk.x_only_public_key().0;
+                let (user_pk, _) = self.keypair.x_only_public_key();
+
+                // CRITICAL: Use the SAME exit delay that the server used to create the boarding address
+                // This should match what's in the boarding descriptor template
+                let exit_delay = client.server_info.boarding_exit_delay.to_consensus_u32();
+
+                tracing::info!(
+                    "Using exit delay from server info: {} (not hardcoded value)",
+                    exit_delay
+                );
+
+                let boarding_state = BoardingOutputState {
+                    outpoint: utxo.outpoint,
+                    amount: utxo.amount,
+                    address: boarding_address.clone(),
+                    script_pubkey: address.script_pubkey().to_hex_string(),
+                    exit_delay, // Use server's unilateral exit delay, not boarding exit delay
+                    server_pubkey: server_pk.to_string(),
+                    user_pubkey: user_pk.to_string(),
+                    confirmation_blocktime: utxo
+                        .confirmation_blocktime
+                        .and_then(|t| DateTime::from_timestamp(t as i64, 0)),
+                    is_spent: false,
+                    is_mutinynet: self.config.is_mutinynet,
+                };
+
+                boarding_store
+                    .save_boarding_output(&self.wallet_id, &boarding_state)
+                    .await?;
+
+                tracing::info!(
+                    "Detected and stored boarding output: {} with {} sats (exit_delay: {})",
+                    utxo.outpoint,
+                    utxo.amount.to_sat(),
+                    boarding_state.exit_delay
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn sync_with_server(&self) -> Result<()> {
+        self.detect_and_store_boarding_outputs().await?;
+
+        self.force_sync_with_server().await?;
+
         tracing::info!("Synced wallet {} with Ark server", self.wallet_id);
         Ok(())
     }
@@ -738,6 +881,18 @@ impl ArkService {
                         balance.confirmed().to_sat(),
                         balance.pending().to_sat()
                     );
+
+                    // Fall back to local, If server reports 0 balance but we have local VTXOs
+                    if balance.confirmed().to_sat() == 0 && balance.pending().to_sat() == 0 {
+                        let local_balance = self.calculate_local_balance().await?;
+                        if local_balance.0.to_sat() > 0 || local_balance.1.to_sat() > 0 {
+                            tracing::info!(
+                                "Server reports zero balance but local VTXOs found, using local balance"
+                            );
+                            return Ok(local_balance);
+                        }
+                    }
+
                     Ok((balance.confirmed(), balance.pending()))
                 }
                 Err(e) => {

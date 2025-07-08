@@ -619,6 +619,13 @@ impl ArkService {
                                 .mark_boarding_output_spent(&self.wallet_id, &state.outpoint)
                                 .await?;
 
+                            // Update boarding transaction status to confirmed
+                            self.update_transaction_status(
+                                &state.outpoint.txid.to_string(),
+                                TransactionStatus::Confirmed,
+                            )
+                            .await?;
+
                             tracing::info!("Marked boarding output {} as spent", state.outpoint);
                         }
 
@@ -658,6 +665,22 @@ impl ArkService {
         }
 
         unreachable!("Loop always returns")
+    }
+
+    async fn update_transaction_status(
+        &self,
+        txid: &str,
+        new_status: TransactionStatus,
+    ) -> Result<()> {
+        let conn = self.storage.get_connection().await;
+
+        conn.execute(
+            "UPDATE transactions SET status = ?1 WHERE wallet_id = ?2 AND txid = ?3",
+            rusqlite::params![serde_json::to_string(&new_status)?, self.wallet_id, txid],
+        )?;
+
+        tracing::debug!("Updated transaction {} status to {:?}", txid, new_status);
+        Ok(())
     }
 
     async fn force_sync_with_server(&self) -> Result<()> {

@@ -366,7 +366,7 @@ impl ArkService {
             .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
 
         // 1. Get available VTXOs
-        let available_vtxos = self.get_spendable_vtxos().await?;
+        let available_vtxos = self.get_confirmed_spendable_vtxos().await?;
         if available_vtxos.is_empty() {
             return Err(ArkiveError::InsufficientFunds {
                 need: amount.to_sat(),
@@ -497,18 +497,48 @@ impl ArkService {
         Ok(txid)
     }
 
-    async fn get_spendable_vtxos(&self) -> Result<Vec<VtxoState>> {
+    // async fn get_spendable_vtxos(&self) -> Result<Vec<VtxoState>> {
+    //     let vtxo_store = VtxoStore::new(&self.storage);
+    //     let all_vtxos = vtxo_store.load_vtxo_states(&self.wallet_id).await?;
+
+    //     // Filter for spendable VTXOs (confirmed and not expired)
+    //     let now = Utc::now();
+    //     let spendable: Vec<VtxoState> = all_vtxos
+    //         .into_iter()
+    //         .filter(|vtxo| matches!(vtxo.status, VtxoStatus::Confirmed) && vtxo.expiry > now)
+    //         .collect();
+
+    //     Ok(spendable)
+    // }
+    async fn get_confirmed_spendable_vtxos(&self) -> Result<Vec<VtxoState>> {
         let vtxo_store = VtxoStore::new(&self.storage);
         let all_vtxos = vtxo_store.load_vtxo_states(&self.wallet_id).await?;
-
-        // Filter for spendable VTXOs (confirmed and not expired)
+    
         let now = Utc::now();
         let spendable: Vec<VtxoState> = all_vtxos
             .into_iter()
-            .filter(|vtxo| matches!(vtxo.status, VtxoStatus::Confirmed) && vtxo.expiry > now)
+            .filter(|vtxo| {
+                matches!(vtxo.status, VtxoStatus::Confirmed) && vtxo.expiry > now
+            })
             .collect();
-
+    
         Ok(spendable)
+    }
+
+    async fn get_round_eligible_vtxos(&self) -> Result<Vec<VtxoState>> {
+        let vtxo_store = VtxoStore::new(&self.storage);
+        let all_vtxos = vtxo_store.load_vtxo_states(&self.wallet_id).await?;
+    
+        let now = Utc::now();
+        let eligible: Vec<VtxoState> = all_vtxos
+            .into_iter()
+            .filter(|vtxo| {
+                matches!(vtxo.status, VtxoStatus::Pending | VtxoStatus::Confirmed) 
+                && vtxo.expiry > now
+            })
+            .collect();
+    
+        Ok(eligible)
     }
 
     async fn update_vtxo_states_after_send(
@@ -551,7 +581,7 @@ impl ArkService {
         self.detect_and_store_boarding_outputs().await?;
 
         // Get spendable VTXOs and boarding outputs
-        let vtxos = self.get_spendable_vtxos().await?;
+        let vtxos = self.get_round_eligible_vtxos().await?;
         let boarding_store = BoardingStore::new(&self.storage);
         let boarding_states = boarding_store
             .load_unspent_boarding_outputs(&self.wallet_id)
@@ -610,7 +640,7 @@ impl ArkService {
                     self.force_sync_with_server().await?;
 
                     // Verify success by checking for new VTXOs
-                    let new_vtxos = self.get_spendable_vtxos().await?;
+                    let new_vtxos = self.get_confirmed_spendable_vtxos().await?;
 
                     if !new_vtxos.is_empty() {
                         // Mark boarding outputs as spent

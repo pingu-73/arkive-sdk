@@ -31,6 +31,8 @@ pub struct Transaction {
     pub tx_type: TransactionType,
     pub status: TransactionStatus,
     pub fee: Option<Amount>,
+    pub source: TransactionSource,
+    pub ark_round_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +48,7 @@ pub enum TransactionStatus {
     Pending,
     Confirmed,
     Failed,
+    Spent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,4 +79,11 @@ pub enum VtxoStatus {
     Confirmed,
     Spent,
     Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TransactionSource {
+    Blockchain,
+    ArkServer,
+    LocalRound,
 }

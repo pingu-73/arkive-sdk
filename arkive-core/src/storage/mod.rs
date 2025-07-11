@@ -2,12 +2,13 @@
 pub mod boarding_store;
 pub mod vtxo_store;
 pub mod wallet_store;
-pub use boarding_store::{BoardingOutputState, BoardingStore};
 
+pub use boarding_store::{BoardingOutputState, BoardingStore};
 pub use vtxo_store::VtxoStore;
 pub use wallet_store::WalletStore;
 
 use crate::error::{ArkiveError, Result};
+
 use rusqlite::{params, Connection};
 use std::path::Path;
 use tokio::sync::Mutex;
@@ -74,11 +75,27 @@ impl Storage {
                 timestamp INTEGER NOT NULL,
                 tx_type TEXT NOT NULL,
                 status TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'Blockchain',
+                last_updated INTEGER NOT NULL,
+                ark_round_id TEXT,
                 fee INTEGER,
                 raw_data TEXT,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
                 PRIMARY KEY (wallet_id, txid)
             )",
+            [],
+        )?;
+
+        // Performance indexes
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_wallet_timestamp 
+            ON transactions(wallet_id, timestamp DESC)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_status 
+            ON transactions(wallet_id, status)",
             [],
         )?;
 

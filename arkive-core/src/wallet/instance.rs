@@ -4,6 +4,7 @@ use crate::error::{ArkiveError, Result};
 use crate::storage::Storage;
 use crate::types::{Address, AddressType, Balance, Transaction, VtxoInfo};
 use crate::wallet::WalletConfig;
+
 use ark_core::ArkAddress;
 use bitcoin::key::Keypair;
 use bitcoin::{Amount, Network};
@@ -28,7 +29,9 @@ impl ArkWallet {
         config: WalletConfig,
         storage: Arc<Storage>,
     ) -> Result<Self> {
-        let bitcoin_service = BitcoinService::new(keypair, config.clone()).await?;
+        let bitcoin_service =
+            BitcoinService::new(keypair, config.clone(), storage.clone(), id.clone()).await?;
+
         let ark_service =
             ArkService::new(keypair, config.clone(), storage.clone(), id.clone()).await?;
 

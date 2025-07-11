@@ -139,7 +139,6 @@ pub async fn handle_transaction_command(
 
         TransactionCommands::History { wallet, limit } => {
             let wallet = manager.load_wallet(&wallet).await?;
-
             println!("Transaction history for wallet '{}':", wallet.name());
 
             let transactions = wallet.transaction_history().await?;
@@ -151,7 +150,7 @@ pub async fn handle_transaction_command(
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL);
-            table.set_header(vec!["Date", "Type", "Amount", "Status", "TXID"]);
+            table.set_header(vec!["Date", "Type", "Amount", "Status", "TXID", "Round"]);
 
             for tx in transactions.iter().take(limit) {
                 let amount_str = if tx.amount >= 0 {
@@ -160,12 +159,19 @@ pub async fn handle_transaction_command(
                     format!("{} sats", tx.amount)
                 };
 
+                let round_display = tx
+                    .ark_round_id
+                    .as_ref()
+                    .map(|id| id.replace("round_", ""))
+                    .unwrap_or_else(|| "-".to_string());
+
                 table.add_row(vec![
                     &tx.timestamp.format("%Y-%m-%d %H:%M").to_string(),
                     &format!("{:?}", tx.tx_type),
                     &amount_str,
                     &format!("{:?}", tx.status),
-                    &tx.txid[..16], // truncated for display
+                    &tx.txid[..16],
+                    &round_display,
                 ]);
             }
 

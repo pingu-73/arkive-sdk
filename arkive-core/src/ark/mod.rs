@@ -3,8 +3,11 @@ use crate::error::{ArkiveError, Result};
 use crate::storage::vtxo_store::{VtxoState, VtxoTreeData};
 use crate::storage::{BoardingOutputState, BoardingStore};
 use crate::storage::{Storage, VtxoStore};
-use crate::types::{Transaction, TransactionStatus, TransactionType, VtxoInfo, VtxoStatus};
+use crate::types::{
+    Transaction, TransactionSource, TransactionStatus, TransactionType, VtxoInfo, VtxoStatus,
+};
 use crate::wallet::WalletConfig;
+
 use ark_client::{Blockchain, Client, ExplorerUtxo, OfflineClient, SpendStatus};
 use ark_core::coin_select::select_vtxos;
 use ark_core::redeem::{build_redeem_transaction, sign_redeem_transaction, VtxoInput};
@@ -14,6 +17,7 @@ use bip39::rand::SeedableRng;
 use bitcoin::key::Keypair;
 use bitcoin::{Amount, Network, Psbt};
 use chrono::{DateTime, Utc};
+use rusqlite::params;
 use std::sync::Arc;
 
 // Blockchain implementation for Esplora
@@ -273,6 +277,7 @@ pub struct ArkService {
     config: WalletConfig,
     storage: Arc<Storage>,
     wallet_id: String,
+    tx_manager: TransactionManager,
 }
 
 impl ArkService {
@@ -282,12 +287,15 @@ impl ArkService {
         storage: Arc<Storage>,
         wallet_id: String,
     ) -> Result<Self> {
+        let tx_manager = TransactionManager::new(storage.clone(), wallet_id.clone());
+
         let mut service = Self {
             client: None,
             keypair,
             config,
             storage: storage.clone(),
             wallet_id: wallet_id.clone(),
+            tx_manager,
         };
 
         // Try to connect to Ark server
@@ -326,37 +334,6 @@ impl ArkService {
                 e
             ))),
         }
-    }
-
-    async fn record_transaction(
-        &self,
-        txid: &str,
-        amount: i64,
-        tx_type: TransactionType,
-    ) -> Result<()> {
-        let conn = self.storage.get_connection().await;
-
-        conn.execute(
-            "INSERT OR REPLACE INTO transactions (wallet_id, txid, amount, timestamp, tx_type, status, fee, raw_data)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                self.wallet_id,
-                txid,
-                amount,
-                Utc::now().timestamp(),
-                serde_json::to_string(&tx_type)?,
-                serde_json::to_string(&TransactionStatus::Pending)?,
-                None::<i64>, // fee
-                None::<String>, // raw_data
-            ],
-        )?;
-
-        tracing::info!(
-            "Recorded transaction: {} with amount: {} sats",
-            txid,
-            amount
-        );
-        Ok(())
     }
 
     pub async fn send(&self, address: ArkAddress, amount: Amount) -> Result<String> {
@@ -485,8 +462,14 @@ impl ArkService {
         self.update_vtxo_states_after_send(&selected_outpoints, &txid)
             .await?;
 
-        // 9. Record transaction
-        self.record_transaction(&txid, -(amount.to_sat() as i64), TransactionType::Ark)
+        // 9. Record tx
+        self.tx_manager
+            .record_transaction_if_new(
+                &txid,
+                -(amount.to_sat() as i64),
+                TransactionType::Ark,
+                TransactionSource::LocalRound,
+            )
             .await?;
 
         tracing::info!(
@@ -599,46 +582,35 @@ impl ArkService {
 
             match client.board(&mut rng).await {
                 Ok(_) => {
-                    tracing::info!("Round participation successful");
+                    let round_id = format!("round_{}", chrono::Utc::now().timestamp());
 
                     // Wait for server processing
                     let wait_time = std::cmp::min(5 + (attempt - 1) * 2, 10);
-                    tracing::info!("Waiting {} seconds for server processing...", wait_time);
                     tokio::time::sleep(tokio::time::Duration::from_secs(wait_time)).await;
 
-                    // Force sync to get new VTXOs
+                    // Sync to get new VTXOs
                     self.force_sync_with_server().await?;
 
-                    // Verify success by checking for new VTXOs
                     let new_vtxos = self.get_spendable_vtxos().await?;
 
                     if !new_vtxos.is_empty() {
-                        // Mark boarding outputs as spent
+                        // Mark boarding outputs as spent with round tracking
+                        let boarding_outpoints: Vec<bitcoin::OutPoint> =
+                            boarding_states.iter().map(|s| s.outpoint).collect();
+
+                        self.tx_manager
+                            .mark_boarding_outputs_spent(&boarding_outpoints, &round_id)
+                            .await?;
+
+                        // Mark boarding outputs as spent in storage
                         for state in &boarding_states {
                             boarding_store
                                 .mark_boarding_output_spent(&self.wallet_id, &state.outpoint)
                                 .await?;
-
-                            // Update boarding transaction status to confirmed
-                            self.update_transaction_status(
-                                &state.outpoint.txid.to_string(),
-                                TransactionStatus::Confirmed,
-                            )
-                            .await?;
-
-                            tracing::info!("Marked boarding output {} as spent", state.outpoint);
                         }
 
-                        let round_id = format!("round_{}", chrono::Utc::now().timestamp());
                         tracing::info!("Successfully participated in round: {}", round_id);
                         return Ok(Some(round_id));
-                    } else if attempt < 3 {
-                        tracing::warn!("No VTXOs created yet, retrying...");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                        continue;
-                    } else {
-                        tracing::warn!("Round participation completed but no VTXOs created");
-                        return Ok(None);
                     }
                 }
                 Err(e) => {
@@ -665,22 +637,6 @@ impl ArkService {
         }
 
         unreachable!("Loop always returns")
-    }
-
-    async fn update_transaction_status(
-        &self,
-        txid: &str,
-        new_status: TransactionStatus,
-    ) -> Result<()> {
-        let conn = self.storage.get_connection().await;
-
-        conn.execute(
-            "UPDATE transactions SET status = ?1 WHERE wallet_id = ?2 AND txid = ?3",
-            rusqlite::params![serde_json::to_string(&new_status)?, self.wallet_id, txid],
-        )?;
-
-        tracing::debug!("Updated transaction {} status to {:?}", txid, new_status);
-        Ok(())
     }
 
     async fn force_sync_with_server(&self) -> Result<()> {
@@ -748,50 +704,35 @@ impl ArkService {
         );
 
         // Update tx history
+        // Get tx history from server
         let history = client
             .transaction_history()
             .await
             .map_err(|e| ArkiveError::ark(format!("Failed to get transaction history: {}", e)))?;
 
+        // Only record new tx
         for tx in history {
-            let (txid, amount, _timestamp, tx_type) = match tx {
-                ArkTransaction::Boarding {
-                    txid,
-                    amount,
-                    confirmed_at,
-                } => (
+            let (txid, amount, tx_type) = match tx {
+                ArkTransaction::Boarding { txid, amount, .. } => (
                     txid.to_string(),
                     amount.to_sat() as i64,
-                    confirmed_at.unwrap_or(Utc::now().timestamp()),
                     TransactionType::Boarding,
                 ),
-                ArkTransaction::Round {
-                    txid,
-                    amount,
-                    created_at,
-                } => (
-                    txid.to_string(),
-                    amount.to_sat(),
-                    created_at,
-                    TransactionType::Ark,
-                ),
-                ArkTransaction::Redeem {
-                    txid,
-                    amount,
-                    created_at,
-                    ..
-                } => (
-                    txid.to_string(),
-                    amount.to_sat(),
-                    created_at,
-                    TransactionType::Ark,
-                ),
+                ArkTransaction::Round { txid, amount, .. } => {
+                    (txid.to_string(), amount.to_sat(), TransactionType::Ark)
+                }
+                ArkTransaction::Redeem { txid, amount, .. } => {
+                    (txid.to_string(), amount.to_sat(), TransactionType::Ark)
+                }
             };
 
-            self.record_transaction(&txid, amount, tx_type).await?;
+            // Only record if new
+            self.tx_manager
+                .record_transaction_if_new(&txid, amount, tx_type, TransactionSource::ArkServer)
+                .await?;
         }
 
-        tracing::info!("Forced sync completed for wallet {}", self.wallet_id);
+        tracing::info!("Sync completed - preserved existing transaction states");
         Ok(())
     }
 
@@ -848,6 +789,15 @@ impl ArkService {
 
                 boarding_store
                     .save_boarding_output(&self.wallet_id, &boarding_state)
+                    .await?;
+
+                self.tx_manager
+                    .record_transaction_if_new(
+                        &utxo.outpoint.txid.to_string(),
+                        utxo.amount.to_sat() as i64,
+                        TransactionType::Boarding,
+                        TransactionSource::Blockchain,
+                    )
                     .await?;
 
                 tracing::info!(
@@ -948,7 +898,7 @@ impl ArkService {
         let conn = self.storage.get_connection().await;
 
         let mut stmt = conn.prepare(
-            "SELECT txid, amount, timestamp, tx_type, status, fee 
+            "SELECT txid, amount, timestamp, tx_type, status, fee, source, ark_round_id
              FROM transactions 
              WHERE wallet_id = ?1 
              ORDER BY timestamp DESC",
@@ -958,6 +908,7 @@ impl ArkService {
             .query_map([&self.wallet_id], |row| {
                 let tx_type_str: String = row.get(3)?;
                 let status_str: String = row.get(4)?;
+                let source_str: String = row.get(6)?;
 
                 let tx_type: TransactionType =
                     serde_json::from_str(&tx_type_str).map_err(|_| {
@@ -987,6 +938,14 @@ impl ArkService {
                     fee: row
                         .get::<_, Option<i64>>(5)?
                         .map(|f| Amount::from_sat(f as u64)),
+                    source: serde_json::from_str(&source_str).map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            6,
+                            "source".to_string(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?,
+                    ark_round_id: row.get::<_, Option<String>>(7)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1067,4 +1026,173 @@ impl ArkService {
     }
 }
 
+pub struct TransactionManager {
+    storage: Arc<Storage>,
+    wallet_id: String,
+}
+
+impl TransactionManager {
+    pub fn new(storage: Arc<Storage>, wallet_id: String) -> Self {
+        Self { storage, wallet_id }
+    }
+
+    pub async fn record_transaction_if_new(
+        &self,
+        txid: &str,
+        amount: i64,
+        tx_type: TransactionType,
+        source: TransactionSource,
+    ) -> Result<bool> {
+        let conn = self.storage.get_connection().await;
+
+        // Check if exists
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM transactions WHERE wallet_id = ?1 AND txid = ?2",
+            params![self.wallet_id, txid],
+            |row| row.get(0),
+        )?;
+
+        if exists {
+            tracing::debug!("Transaction {} already exists, preserving state", txid);
+            return Ok(false);
+        }
+
+        // Insert new tx
+        conn.execute(
+            "INSERT INTO transactions 
+             (wallet_id, txid, amount, timestamp, tx_type, status, source, last_updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                self.wallet_id,
+                txid,
+                amount,
+                Utc::now().timestamp(),
+                serde_json::to_string(&tx_type)?,
+                serde_json::to_string(&TransactionStatus::Pending)?,
+                serde_json::to_string(&source)?,
+                Utc::now().timestamp(),
+            ],
+        )?;
+
+        tracing::info!(
+            "Recorded new {} transaction: {} ({} sats)",
+            format!("{:?}", tx_type),
+            txid,
+            amount
+        );
+        Ok(true)
+    }
+
+    // Update status with validation
+    pub async fn update_transaction_status(
+        &self,
+        txid: &str,
+        new_status: TransactionStatus,
+        round_id: Option<String>,
+    ) -> Result<bool> {
+        let conn = self.storage.get_connection().await;
+
+        let rows_affected = conn.execute(
+            "UPDATE transactions 
+             SET status = ?1, last_updated = ?2, ark_round_id = COALESCE(?3, ark_round_id)
+             WHERE wallet_id = ?4 AND txid = ?5",
+            params![
+                serde_json::to_string(&new_status)?,
+                Utc::now().timestamp(),
+                round_id,
+                self.wallet_id,
+                txid,
+            ],
+        )?;
+
+        if rows_affected > 0 {
+            tracing::info!("Updated transaction {} status to {:?}", txid, new_status);
+        }
+
+        Ok(rows_affected > 0)
+    }
+
+    // Mark boarding outputs as spent in round
+    pub async fn mark_boarding_outputs_spent(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+        round_id: &str,
+    ) -> Result<()> {
+        for outpoint in outpoints {
+            self.update_transaction_status(
+                &outpoint.txid.to_string(),
+                TransactionStatus::Spent,
+                Some(round_id.to_string()),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    // Get tx history for specific tx type
+    pub async fn get_transaction_history_by_type(
+        &self,
+        tx_type: TransactionType,
+    ) -> Result<Vec<Transaction>> {
+        let conn = self.storage.get_connection().await;
+
+        let mut stmt = conn.prepare(
+            "SELECT txid, amount, timestamp, tx_type, status, fee, source, ark_round_id
+             FROM transactions 
+             WHERE wallet_id = ?1 AND tx_type = ?2
+             ORDER BY timestamp DESC",
+        )?;
+
+        let transactions = stmt
+            .query_map(
+                [&self.wallet_id, &serde_json::to_string(&tx_type)?],
+                |row| {
+                    let tx_type_str: String = row.get(3)?;
+                    let status_str: String = row.get(4)?;
+                    let source_str: String = row.get(6)?;
+
+                    let tx_type: TransactionType =
+                        serde_json::from_str(&tx_type_str).map_err(|_| {
+                            rusqlite::Error::InvalidColumnType(
+                                3,
+                                "tx_type".to_string(),
+                                rusqlite::types::Type::Text,
+                            )
+                        })?;
+
+                    let status: TransactionStatus =
+                        serde_json::from_str(&status_str).map_err(|_| {
+                            rusqlite::Error::InvalidColumnType(
+                                4,
+                                "status".to_string(),
+                                rusqlite::types::Type::Text,
+                            )
+                        })?;
+
+                    Ok(Transaction {
+                        txid: row.get(0)?,
+                        amount: row.get(1)?,
+                        timestamp: chrono::DateTime::from_timestamp(row.get::<_, i64>(2)?, 0)
+                            .unwrap_or_else(Utc::now),
+                        tx_type,
+                        status,
+                        fee: row
+                            .get::<_, Option<i64>>(5)?
+                            .map(|f| Amount::from_sat(f as u64)),
+                        source: serde_json::from_str(&source_str).map_err(|_| {
+                            rusqlite::Error::InvalidColumnType(
+                                6,
+                                "source".to_string(),
+                                rusqlite::types::Type::Text,
+                            )
+                        })?,
+                        ark_round_id: row.get::<_, Option<String>>(7)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(transactions)
+    }
+}
 use std::str::FromStr;

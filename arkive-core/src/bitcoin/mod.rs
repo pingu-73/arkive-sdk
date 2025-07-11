@@ -1,27 +1,39 @@
+use crate::ark::TransactionManager;
 use crate::error::{ArkiveError, Result};
-use crate::types::{Transaction, TransactionStatus, TransactionType};
+use crate::storage::Storage;
+use crate::types::{Transaction, TransactionSource, TransactionStatus, TransactionType};
 use crate::wallet::WalletConfig;
+
 use bitcoin::key::Keypair;
 use bitcoin::Amount;
-use chrono::Utc;
 use esplora_client::AsyncClient;
+use std::sync::Arc;
 
 pub struct BitcoinService {
     keypair: Keypair,
     config: WalletConfig,
     client: AsyncClient,
+    tx_manager: TransactionManager,
 }
 
 impl BitcoinService {
-    pub async fn new(keypair: Keypair, config: WalletConfig) -> Result<Self> {
+    pub async fn new(
+        keypair: Keypair,
+        config: WalletConfig,
+        storage: Arc<Storage>,
+        wallet_id: String,
+    ) -> Result<Self> {
         let client = esplora_client::Builder::new(&config.esplora_url)
             .build_async()
             .map_err(|e| ArkiveError::esplora(format!("Failed to create esplora client: {}", e)))?;
+
+        let tx_manager = TransactionManager::new(storage, wallet_id.clone());
 
         Ok(Self {
             keypair,
             config,
             client,
+            tx_manager,
         })
     }
 
@@ -98,12 +110,11 @@ impl BitcoinService {
             .await
             .map_err(|e| ArkiveError::esplora(format!("Failed to get transactions: {}", e)))?;
 
-        let mut transactions = Vec::new();
-
-        for tx in txs {
+        // Record tx using tx manager
+        for tx in &txs {
             let mut net_amount = 0i64;
 
-            // Calculate net amount for this transaction
+            // Calculate net amount for this tx
             for output in &tx.vout {
                 if output.scriptpubkey == script_pubkey {
                     net_amount += output.value as i64;
@@ -111,29 +122,32 @@ impl BitcoinService {
             }
 
             if net_amount != 0 {
-                transactions.push(Transaction {
-                    txid: tx.txid.to_string(),
-                    amount: net_amount,
-                    timestamp: chrono::DateTime::from_timestamp(
-                        tx.status
-                            .block_time
-                            .unwrap_or(Utc::now().timestamp() as u64)
-                            as i64,
-                        0,
+                // Use tx manager to record if new
+                self.tx_manager
+                    .record_transaction_if_new(
+                        &tx.txid.to_string(),
+                        net_amount,
+                        TransactionType::OnChain,
+                        TransactionSource::Blockchain,
                     )
-                    .unwrap_or_else(Utc::now),
-                    tx_type: TransactionType::OnChain,
-                    status: if tx.status.confirmed {
-                        TransactionStatus::Confirmed
-                    } else {
-                        TransactionStatus::Pending
-                    },
-                    fee: None,
-                });
+                    .await?;
+
+                // Update status based on confirmation
+                let status = if tx.status.confirmed {
+                    TransactionStatus::Confirmed
+                } else {
+                    TransactionStatus::Pending
+                };
+
+                self.tx_manager
+                    .update_transaction_status(&tx.txid.to_string(), status, None)
+                    .await?;
             }
         }
 
-        Ok(transactions)
+        self.tx_manager
+            .get_transaction_history_by_type(TransactionType::OnChain)
+            .await
     }
 
     pub async fn sync(&self) -> Result<()> {

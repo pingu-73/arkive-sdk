@@ -489,9 +489,9 @@ impl ArkService {
         let spendable: Vec<VtxoState> = all_vtxos
             .into_iter()
             .filter(|vtxo| {
-                (matches!(vtxo.status, VtxoStatus::Confirmed) || 
-                 matches!(vtxo.status, VtxoStatus::Pending)) && 
-                vtxo.expiry > now
+                (matches!(vtxo.status, VtxoStatus::Confirmed)
+                    || matches!(vtxo.status, VtxoStatus::Pending))
+                    && vtxo.expiry > now
             })
             .collect();
 

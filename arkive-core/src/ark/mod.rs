@@ -488,7 +488,11 @@ impl ArkService {
         let now = Utc::now();
         let spendable: Vec<VtxoState> = all_vtxos
             .into_iter()
-            .filter(|vtxo| matches!(vtxo.status, VtxoStatus::Confirmed) && vtxo.expiry > now)
+            .filter(|vtxo| {
+                (matches!(vtxo.status, VtxoStatus::Confirmed)
+                    || matches!(vtxo.status, VtxoStatus::Pending))
+                    && vtxo.expiry > now
+            })
             .collect();
 
         Ok(spendable)

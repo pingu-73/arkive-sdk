@@ -106,11 +106,12 @@ pub async fn handle_transaction_command(
             let amount = Amount::from_sat(amount);
 
             // Check Ark balance
-            let (confirmed, _pending) = wallet.ark_balance().await?;
-            if confirmed < amount {
+            let (confirmed, pending) = wallet.ark_balance().await?;
+            let total_bal = confirmed + pending;
+            if total_bal < amount {
                 return Err(ArkiveError::InsufficientFunds {
                     need: amount.to_sat(),
-                    available: confirmed.to_sat(),
+                    available: total_bal.to_sat(),
                 });
             }
 

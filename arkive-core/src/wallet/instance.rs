@@ -122,11 +122,12 @@ impl ArkWallet {
             .map_err(|e| ArkiveError::InvalidAddress(format!("Invalid Ark address: {}", e)))?;
 
         // Check balance before sending
-        let (confirmed, _) = self.ark_service.get_balance().await?;
-        if confirmed < amount {
+        let (confirmed, pending) = self.ark_service.get_balance().await?;
+        let total_bal = confirmed + pending;
+        if total_bal < amount {
             return Err(ArkiveError::InsufficientFunds {
                 need: amount.to_sat(),
-                available: confirmed.to_sat(),
+                available: total_bal.to_sat(),
             });
         }
 

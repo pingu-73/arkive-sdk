@@ -91,14 +91,15 @@ impl TwoPlayerLottery {
             && self
                 .players
                 .get(&player_id)
-                .map_or(false, |p| p.commitment.is_none())
+                .is_some_and(|p| p.commitment.is_none())
     }
 
     pub fn can_reveal(&self, player_id: PlayerId) -> bool {
         matches!(self.state_manager.current_state(), GameState::InProgress)
-            && self.players.get(&player_id).map_or(false, |p| {
-                p.commitment.is_some() && p.revealed_secret.is_none()
-            })
+            && self
+                .players
+                .get(&player_id)
+                .is_some_and(|p| p.commitment.is_some() && p.revealed_secret.is_none())
     }
 
     /// Place bet for a player

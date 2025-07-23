@@ -25,8 +25,7 @@ pub struct StateManager {
 impl StateManager {
     pub fn new() -> Self {
         let initial_state = GameState::WaitingForPlayers;
-        let mut state_history = Vec::new();
-        state_history.push((initial_state.clone(), Utc::now()));
+        let state_history = vec![(initial_state.clone(), Utc::now())];
 
         Self {
             current_state: initial_state,

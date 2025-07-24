@@ -84,7 +84,7 @@ impl TestEnvironment {
 
         let ark_response = self
             .http_client
-            .get(&format!("{}/v1/info", ARK_SERVER_URL))
+            .get(format!("{}/v1/info", ARK_SERVER_URL))
             .send()
             .await
             .context("Failed to connect to Ark server - is Nigiri running with --ark flag?")?;
@@ -100,7 +100,7 @@ impl TestEnvironment {
     async fn get_forfeit_address(&self) -> Result<String> {
         let response = self
             .http_client
-            .get(&format!("{}/v1/info", ARK_SERVER_URL))
+            .get(format!("{}/v1/info", ARK_SERVER_URL))
             .send()
             .await?;
 
@@ -125,7 +125,7 @@ impl TestEnvironment {
 
     pub async fn nigiri_faucet(&self, address: &str, amount_btc: f64) -> Result<String> {
         let output = Command::new("nigiri")
-            .args(&["faucet", address, &amount_btc.to_string()])
+            .args(["faucet", address, &amount_btc.to_string()])
             .output()
             .context("Failed to execute nigiri faucet command - is nigiri in PATH?")?;
 
@@ -151,7 +151,7 @@ impl TestEnvironment {
 
     pub async fn mine_blocks(&self, count: u32) -> Result<Vec<String>> {
         let new_addr_output = Command::new("nigiri")
-            .args(&["rpc", "getnewaddress"])
+            .args(["rpc", "getnewaddress"])
             .output()
             .context("Failed to get new address from nigiri")?;
 
@@ -166,7 +166,7 @@ impl TestEnvironment {
 
         // mine blocks to that addr
         let output = Command::new("nigiri")
-            .args(&["rpc", "generatetoaddress", &count.to_string(), &new_address])
+            .args(["rpc", "generatetoaddress", &count.to_string(), &new_address])
             .output()
             .context("Failed to execute nigiri mine command")?;
 

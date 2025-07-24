@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 arkive-core = { path = "../arkive-core" }
+arkive-gaming = { path = "../arkive-gaming" }
 
 # CLI dependencies
 bitcoin = {workspace = true}
@@ -21,9 +22,11 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 # Additional CLI dependencies
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5.0"
 comfy-table = "7.0"
 dialoguer = "0.11"
+hex = "0.4"

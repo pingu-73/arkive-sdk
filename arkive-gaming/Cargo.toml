@@ -21,3 +21,5 @@ hex = "0.4"
 rand = "0.8"
 tracing = { workspace = true }
 async-trait = "0.1"
+
+dirs = "5.0" # for file based storage, subject to change in future

@@ -446,6 +446,22 @@ impl LotteryPlayer {
             secret: None,
         }
     }
+
+    pub fn get_secret(&self) -> Option<&Vec<u8>> {
+        self.secret.as_ref()
+    }
+
+    pub fn has_commitment(&self) -> bool {
+        self.commitment.is_some()
+    }
+
+    pub fn has_revealed(&self) -> bool {
+        self.revealed_secret.is_some()
+    }
+
+    pub fn core_player(&self) -> &Player {
+        &self.core_player
+    }
 }
 
 #[async_trait]

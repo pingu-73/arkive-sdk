@@ -215,16 +215,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arkive-core",
+ "arkive-gaming",
  "bitcoin",
  "clap",
  "comfy-table",
  "dialoguer",
  "dirs",
+ "hex",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -271,6 +274,7 @@ dependencies = [
  "async-trait",
  "bitcoin",
  "chrono",
+ "dirs",
  "hex",
  "rand 0.8.5",
  "serde",

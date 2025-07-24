@@ -8,6 +8,9 @@ pub enum GamingError {
     #[error("Arkive core error: {0}")]
     ArkiveCore(#[from] arkive_core::ArkiveError),
 
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("Invalid game state: {0}")]
     InvalidState(String),
 

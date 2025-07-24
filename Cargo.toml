@@ -1,5 +1,5 @@
 [workspace]
-members = ["arkive-core", "arkive-cli", "arkive-gaming"]
+members = ["arkive-core", "arkive-cli", "arkive-gaming", "e2e-tests"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -44,3 +44,11 @@ base64 = "0.21"
 # CLI
 clap = { version = "4.0", features = ["derive"] }
 dialoguer = "0.11"
+
+# Testing
+async-trait = "0.1"
+tempfile = "3.8"
+tracing-test = "0.2"
+tokio-test = "0.4"
+futures = "0.3"
+regex = "1.0"

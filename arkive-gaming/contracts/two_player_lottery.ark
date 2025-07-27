@@ -1,0 +1,106 @@
+
+options {
+  server = server;
+  exit = 144; // 24 hours exit timelock
+}
+
+contract TwoPlayerLottery(
+  pubkey player1,
+  pubkey player2, 
+  pubkey server,
+  bytes commitment1,
+  bytes commitment2,
+  int betAmount,
+  int gameTimeout
+) {
+  
+  // Player 1 wins by revealing their commitment and proving they won
+  function player1Wins(
+    signature player1Sig,
+    int value1,
+    bytes nonce1,
+    int value2, 
+    bytes nonce2
+  ) {
+    // Verify player1 signature
+    require(checkSig(player1Sig, player1), "Invalid player1 signature");
+    
+    // Verify commitments match revealed values
+    bytes hash1 = sha256(value1 + nonce1);
+    bytes hash2 = sha256(value2 + nonce2);
+    require(hash1 == commitment1, "Invalid commitment1 reveal");
+    require(hash2 == commitment2, "Invalid commitment2 reveal");
+    
+    // Verify player1 actually won (XOR result is even)
+    int combined = value1 ^ value2;
+    require(combined % 2 == 0, "Player1 did not win");
+    
+    // Verify timeout hasn't passed
+    require(tx.time <= gameTimeout, "Game timeout exceeded");
+    
+    // Send entire pot to player1
+    require(tx.outputs[0].value == betAmount * 2, "Incorrect payout amount");
+    require(tx.outputs[0].scriptPubKey == new P2TR(player1), "Incorrect payout address");
+  }
+  
+  // Player 2 wins by revealing their commitment and proving they won
+  function player2Wins(
+    signature player2Sig,
+    int value1,
+    bytes nonce1, 
+    int value2,
+    bytes nonce2
+  ) {
+    // Verify player2 signature
+    require(checkSig(player2Sig, player2), "Invalid player2 signature");
+    
+    // Verify commitments match revealed values
+    bytes hash1 = sha256(value1 + nonce1);
+    bytes hash2 = sha256(value2 + nonce2);
+    require(hash1 == commitment1, "Invalid commitment1 reveal");
+    require(hash2 == commitment2, "Invalid commitment2 reveal");
+    
+    // Verify player2 actually won (XOR result is odd)
+    int combined = value1 ^ value2;
+    require(combined % 2 == 1, "Player2 did not win");
+    
+    // Verify timeout hasn't passed
+    require(tx.time <= gameTimeout, "Game timeout exceeded");
+    
+    // Send entire pot to player2
+    require(tx.outputs[0].value == betAmount * 2, "Incorrect payout amount");
+    require(tx.outputs[0].scriptPubKey == new P2TR(player2), "Incorrect payout address");
+  }
+  
+  // Player 1 wins by timeout (player 2 failed to reveal)
+  function player1TimeoutWin(signature player1Sig) {
+    require(checkSig(player1Sig, player1), "Invalid player1 signature");
+    require(tx.time > gameTimeout, "Timeout not reached");
+    
+    // Send entire pot to player1
+    require(tx.outputs[0].value == betAmount * 2, "Incorrect payout amount");
+    require(tx.outputs[0].scriptPubKey == new P2TR(player1), "Incorrect payout address");
+  }
+  
+  // Player 2 wins by timeout (player 1 failed to reveal)  
+  function player2TimeoutWin(signature player2Sig) {
+    require(checkSig(player2Sig, player2), "Invalid player2 signature");
+    require(tx.time > gameTimeout, "Timeout not reached");
+    
+    // Send entire pot to player2
+    require(tx.outputs[0].value == betAmount * 2, "Incorrect payout amount");
+    require(tx.outputs[0].scriptPubKey == new P2TR(player2), "Incorrect payout address");
+  }
+  
+  // Mutual abort - both players get their money back
+  function mutualAbort(signature player1Sig, signature player2Sig) {
+    require(checkSig(player1Sig, player1), "Invalid player1 signature");
+    require(checkSig(player2Sig, player2), "Invalid player2 signature");
+    
+    // Return bet to each player
+    require(tx.outputs[0].value == betAmount, "Incorrect refund amount");
+    require(tx.outputs[0].scriptPubKey == new P2TR(player1), "Incorrect player1 refund address");
+    require(tx.outputs[1].value == betAmount, "Incorrect refund amount");
+    require(tx.outputs[1].scriptPubKey == new P2TR(player2), "Incorrect player2 refund address");
+  }
+}

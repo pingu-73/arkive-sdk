@@ -1,278 +1,313 @@
-use arkive_core::{Amount, ArkiveError, Result, WalletManager};
-use arkive_gaming::{GameManager, StoredGameState};
+#![allow(unused_imports)]
+use arkive_core::{Result as ArkiveResult, WalletManager};
+use arkive_gaming::{initialize_gaming, TwoPlayerLottery, GameState};
+use bitcoin::Amount;
 use clap::Subcommand;
 use comfy_table::{presets::UTF8_FULL, Table};
-use std::path::Path;
-use uuid::Uuid;
-
-fn map_gaming_error(err: arkive_gaming::GamingError) -> ArkiveError {
-    ArkiveError::internal(format!("Gaming error: {}", err))
-}
 
 #[derive(Subcommand)]
 pub enum GameCommands {
-    /// Create a new lottery game
+    /// Create a new two-player lotterys
     CreateLottery {
-        /// Wallet name to use for escrow
-        wallet: String,
+        /// Game ID
+        game_id: String,
         /// Bet amount in satoshis
-        #[arg(short, long)]
         amount: u64,
-    },
-    /// List all games
-    List,
-    /// Show game details
-    Info {
-        /// Game ID
-        game_id: String,
-    },
-    /// Join an existing game
-    Join {
-        /// Game ID
-        game_id: String,
-        /// Wallet name
+        /// Creator wallet name
         wallet: String,
     },
-    /// Place bet in a game
-    Bet {
-        /// Game ID
+    /// Join an existing lottery
+    JoinLottery {
+        /// Game ID to join
         game_id: String,
-        /// Wallet name
+        /// Joiner wallet name
         wallet: String,
     },
-    /// Submit commitment (automatic secret generation)
+    /// Deposit funds to a game
+    Deposit {
+        /// Game ID
+        game_id: String,
+        /// Player wallet name
+        wallet: String,
+    },
+    /// Submit commitment for a game
     Commit {
         /// Game ID
         game_id: String,
-        /// Wallet name
+        /// Player wallet name
         wallet: String,
     },
-    /// Reveal commitment (uses stored secret)
+    /// Submit reveal for a game
     Reveal {
         /// Game ID
         game_id: String,
-        /// Wallet name
+        /// Player wallet name
         wallet: String,
+        /// Commitment data (JSON format)
+        commitment_data: String,
     },
-    /// Forfeit a game
-    Forfeit {
+    /// Show game status
+    Status {
         /// Game ID
         game_id: String,
+    },
+    /// List all games for a wallet
+    List {
         /// Wallet name
         wallet: String,
     },
-    /// Delete a completed game
-    Delete {
+    /// Handle timeout for a game
+    Timeout {
         /// Game ID
         game_id: String,
     },
 }
 
-pub async fn handle_game_command(
-    cmd: GameCommands,
-    manager: &WalletManager,
-    data_dir: &Path,
-) -> Result<()> {
-    let game_manager = GameManager::new(data_dir).await.map_err(map_gaming_error)?;
+pub async fn handle_game_command(cmd: GameCommands, manager: &WalletManager) -> ArkiveResult<()> {
+    // init gaming module
+    let lottery = initialize_gaming(
+        std::sync::Arc::new(manager.clone()),
+        None, // default arkadec path
+    ).await
+    .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to initialize gaming: {}", e)))?;
 
     match cmd {
-        GameCommands::CreateLottery { wallet, amount } => {
+        GameCommands::CreateLottery { game_id, amount, wallet } => {
             let wallet_instance = manager.load_wallet(&wallet).await?;
+            let ark_address = wallet_instance.get_ark_address().await?;
+            
             let bet_amount = Amount::from_sat(amount);
-
-            println!("Creating lottery game with {} sats bet...", amount);
-
-            let game_id = game_manager
-                .create_lottery_game(bet_amount, wallet_instance)
-                .await
-                .map_err(map_gaming_error)?;
-
-            println!("Lottery game created successfully!");
+            
+            println!("Creating two-player lottery...");
             println!("Game ID: {}", game_id);
-            println!(
-                "Players can join with: arkive game join {} <wallet>",
-                game_id
-            );
+            println!("Bet Amount: {} sats", amount);
+            println!("Creator: {}", wallet);
+
+            let created_game_id = lottery.create_game(
+                game_id.clone(),
+                bet_amount,
+                &wallet,
+                arkive_core::ArkAddress::decode(&ark_address.address)
+                    .map_err(|e| arkive_core::ArkiveError::internal(format!("Invalid ark address: {}", e)))?,
+            ).await
+            .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to create game: {}", e)))?;
+
+            println!("✅ Lottery created successfully!");
+            println!("Game ID: {}", created_game_id);
+            println!("Waiting for another player to join...");
         }
 
-        GameCommands::List => {
-            let games = game_manager.list_games().await.map_err(map_gaming_error)?;
+        GameCommands::JoinLottery { game_id, wallet } => {
+            let wallet_instance = manager.load_wallet(&wallet).await?;
+            let ark_address = wallet_instance.get_ark_address().await?;
+
+            println!("Joining lottery game: {}", game_id);
+            println!("Player: {}", wallet);
+
+            lottery.join_game(
+                &game_id,
+                &wallet,
+                arkive_core::ArkAddress::decode(&ark_address.address)
+                    .map_err(|e| arkive_core::ArkiveError::internal(format!("Invalid ark address: {}", e)))?,
+            ).await
+            .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to join game: {}", e)))?;
+
+            println!("✅ Successfully joined the lottery!");
+            println!("Game is now ready. Proceed to deposit funds.");
+        }
+
+        GameCommands::Deposit { game_id, wallet } => {
+            println!("Depositing funds to game: {}", game_id);
+            
+            // Get game state to determine player ID
+            let game_state = lottery.get_game_state(&game_id).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to get game state: {}", e)))?;
+
+            let player_id = game_state.players
+                .iter()
+                .find(|p| p.wallet_id == wallet)
+                .map(|p| p.id.clone())
+                .ok_or_else(|| arkive_core::ArkiveError::internal("Player not found in game"))?;
+
+            let txid = lottery.deposit_funds(&game_id, &player_id).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to deposit funds: {}", e)))?;
+
+            println!("✅ Funds deposited successfully!");
+            println!("Transaction ID: {}", txid);
+            println!("Bet Amount: {} sats", game_state.bet_amount.to_sat());
+        }
+
+        GameCommands::Commit { game_id, wallet } => {
+            println!("Submitting commitment for game: {}", game_id);
+
+            // Get game state to determine player ID
+            let game_state = lottery.get_game_state(&game_id).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to get game state: {}", e)))?;
+
+            let player_id = game_state.players
+                .iter()
+                .find(|p| p.wallet_id == wallet)
+                .map(|p| p.id.clone())
+                .ok_or_else(|| arkive_core::ArkiveError::internal("Player not found in game"))?;
+
+            let (commitment, commitment_data) = lottery.submit_commitment(&game_id, &player_id).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to submit commitment: {}", e)))?;
+
+            println!("✅ Commitment submitted successfully!");
+            println!("Commitment Hash: {}", commitment.hash);
+            println!("⚠️  IMPORTANT: Save this commitment data securely!");
+            println!("You will need it for the reveal phase:");
+            println!("{}", serde_json::to_string_pretty(&commitment_data)
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to serialize commitment data: {}", e)))?);
+        }
+
+        GameCommands::Reveal { game_id, wallet, commitment_data } => {
+            println!("Submitting reveal for game: {}", game_id);
+
+            // Parse commitment data
+            let commitment_data: arkive_gaming::CommitmentData = serde_json::from_str(&commitment_data)
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Invalid commitment data: {}", e)))?;
+
+            // Get game state to determine player ID
+            let game_state = lottery.get_game_state(&game_id).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to get game state: {}", e)))?;
+
+            let player_id = game_state.players
+                .iter()
+                .find(|p| p.wallet_id == wallet)
+                .map(|p| p.id.clone())
+                .ok_or_else(|| arkive_core::ArkiveError::internal("Player not found in game"))?;
+
+            lottery.submit_reveal(&game_id, &player_id, commitment_data).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to submit reveal: {}", e)))?;
+
+            println!("✅ Reveal submitted successfully!");
+            println!("Waiting for other player to reveal...");
+        }
+
+        GameCommands::Status { game_id } => {
+            let game_state = lottery.get_game_state(&game_id).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to get game state: {}", e)))?;
+
+            println!("Game Status for: {}", game_id);
+            println!("================");
+            println!("State: {:?}", game_state.state);
+            println!("Bet Amount: {} sats", game_state.bet_amount.to_sat());
+            println!("Pot Amount: {} sats", game_state.pot_amount.to_sat());
+            println!("Created: {}", game_state.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!("Updated: {}", game_state.updated_at.format("%Y-%m-%d %H:%M:%S UTC"));
+
+            if let Some(escrow_addr) = &game_state.escrow_address {
+                println!("Escrow Address: {}", escrow_addr);
+            }
+
+            println!("\nPlayers:");
+            let mut table = Table::new();
+            table.load_preset(UTF8_FULL);
+            table.set_header(vec!["ID", "Wallet", "Address", "Committed", "Revealed"]);
+
+            for player in &game_state.players {
+                let committed = if game_state.has_committed(&player.id) { "✅" } else { "❌" };
+                let revealed = if game_state.has_revealed(&player.id) { "✅" } else { "❌" };
+
+                table.add_row(vec![
+                    &player.id,
+                    &player.wallet_id,
+                    &format!("{}...", &player.ark_address.to_string()[..20]),
+                    committed,
+                    revealed,
+                ]);
+            }
+            println!("{}", table);
+
+            println!("\nTimeouts:");
+            println!("Commitment: {}", game_state.timeouts.commitment_timeout.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!("Reveal: {}", game_state.timeouts.reveal_timeout.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!("Game: {}", game_state.timeouts.game_timeout.format("%Y-%m-%d %H:%M:%S UTC"));
+
+            if let Some(result) = &game_state.result {
+                println!("\nResult:");
+                if let Some(winner) = &result.winner {
+                    println!("Winner: {}", winner);
+                    println!("Prize: {} sats", result.pot_amount.to_sat());
+                } else {
+                    println!("Game aborted - no winner");
+                }
+                println!("Reason: {:?}", result.reason);
+                if let Some(txid) = &result.transaction_id {
+                    println!("Transaction: {}", txid);
+                }
+                println!("Finished: {}", result.finished_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            }
+        }
+
+        GameCommands::List { wallet } => {
+            let games = lottery.get_player_games(&wallet).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to get player games: {}", e)))?;
 
             if games.is_empty() {
-                println!("No games found.");
-                println!(
-                    "Create a new game with: arkive game create-lottery <wallet> --amount <sats>"
-                );
+                println!("No games found for wallet: {}", wallet);
                 return Ok(());
             }
 
+            println!("Games for wallet: {}", wallet);
+            println!("===================");
+
             let mut table = Table::new();
             table.load_preset(UTF8_FULL);
-            table.set_header(vec!["Game ID", "Type", "Created", "Status"]);
+            table.set_header(vec![
+                "Game ID",
+                "State",
+                "Bet (sats)",
+                "Pot (sats)",
+                "Players",
+                "Created",
+                "Winner",
+            ]);
 
-            for game_id in games {
-                match game_manager.get_game_info(game_id).await {
-                    Ok(stored_state) => {
-                        let status = extract_game_status(&stored_state);
-                        table.add_row(vec![
-                            &game_id.to_string()[..8],
-                            &stored_state.game_type,
-                            &stored_state.created_at.format("%Y-%m-%d %H:%M").to_string(),
-                            &status,
-                        ]);
-                    }
-                    Err(_) => {
-                        table.add_row(vec![
-                            &game_id.to_string()[..8],
-                            "Unknown",
-                            "Unknown",
-                            "Error",
-                        ]);
-                    }
-                }
+            for game in games {
+                let winner = game.result
+                    .as_ref()
+                    .and_then(|r| r.winner.as_ref())
+                    .unwrap_or(&"-".to_string())
+                    .clone();
+
+                table.add_row(vec![
+                    &game.game_id,
+                    &format!("{:?}", game.state),
+                    &game.bet_amount.to_sat().to_string(),
+                    &game.pot_amount.to_sat().to_string(),
+                    &game.players.len().to_string(),
+                    &game.created_at.format("%m-%d %H:%M").to_string(),
+                    &winner,
+                ]);
             }
 
             println!("{}", table);
         }
 
-        GameCommands::Info { game_id } => {
-            let game_uuid = Uuid::parse_str(&game_id)
-                .map_err(|_| arkive_core::ArkiveError::config("Invalid game ID format"))?;
+        GameCommands::Timeout { game_id } => {
+            println!("Handling timeout for game: {}", game_id);
 
-            let stored_state = game_manager
-                .get_game_info(game_uuid)
-                .await
-                .map_err(map_gaming_error)?;
+            lottery.handle_timeout(&game_id).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to handle timeout: {}", e)))?;
 
-            println!("Game Information:");
-            println!("  ID: {}", stored_state.game_id);
-            println!("  Type: {}", stored_state.game_type);
-            println!(
-                "  Created: {}",
-                stored_state.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
-            println!(
-                "  Updated: {}",
-                stored_state.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
+            println!("✅ Timeout handled successfully!");
+            
+            // Show updated game status
+            let game_state = lottery.get_game_state(&game_id).await
+                .map_err(|e| arkive_core::ArkiveError::internal(format!("Failed to get game state: {}", e)))?;
 
-            // Extract and display game-specific info
-            if let Ok(game_info) =
-                serde_json::from_value::<serde_json::Value>(stored_state.state.clone())
-            {
-                println!("  Status: {}", extract_game_status(&stored_state));
-
-                if let Some(bet_amount) = game_info.get("bet_amount") {
-                    println!("  Bet Amount: {} sats", bet_amount);
-                }
-
-                if let Some(player_count) = game_info.get("player_count") {
-                    println!("  Players: {}/2", player_count);
-                }
-
-                if let Some(escrow_address) = game_info.get("escrow_address") {
-                    if !escrow_address.is_null() {
-                        println!(
-                            "  Escrow Address: {}",
-                            escrow_address.as_str().unwrap_or("N/A")
-                        );
-                    }
+            if let Some(result) = &game_state.result {
+                if let Some(winner) = &result.winner {
+                    println!("Winner by timeout: {}", winner);
+                    println!("Prize: {} sats", result.pot_amount.to_sat());
+                } else {
+                    println!("Game aborted due to timeout - refunds issued");
                 }
             }
-        }
-
-        GameCommands::Join { game_id, wallet } => {
-            let _game_uuid = Uuid::parse_str(&game_id)
-                .map_err(|_| arkive_core::ArkiveError::config("Invalid game ID format"))?;
-            let _wallet_instance = manager.load_wallet(&wallet).await?;
-
-            // TODO: Implement actual game joining logic
-            println!("Game joining functionality coming soon!");
-            println!("Game ID: {}", game_id);
-            println!("Wallet: {}", wallet);
-        }
-
-        GameCommands::Bet { game_id, wallet } => {
-            let _game_uuid = Uuid::parse_str(&game_id)
-                .map_err(|_| arkive_core::ArkiveError::config("Invalid game ID format"))?;
-            let _wallet_instance = manager.load_wallet(&wallet).await?;
-
-            // TODO: Implement actual betting logic
-            println!("Betting functionality coming soon!");
-            println!("Game ID: {}", game_id);
-            println!("Wallet: {}", wallet);
-        }
-
-        GameCommands::Commit { game_id, wallet } => {
-            let _game_uuid = Uuid::parse_str(&game_id)
-                .map_err(|_| arkive_core::ArkiveError::config("Invalid game ID format"))?;
-            let _wallet_instance = manager.load_wallet(&wallet).await?;
-
-            // TODO: Implement commitment logic
-            println!("Commitment functionality coming soon!");
-            println!("Game ID: {}", game_id);
-            println!("Wallet: {}", wallet);
-        }
-
-        GameCommands::Reveal { game_id, wallet } => {
-            let _game_uuid = Uuid::parse_str(&game_id)
-                .map_err(|_| arkive_core::ArkiveError::config("Invalid game ID format"))?;
-            let _wallet_instance = manager.load_wallet(&wallet).await?;
-
-            // TODO: Implement reveal logic
-            println!("Reveal functionality coming soon!");
-            println!("Game ID: {}", game_id);
-            println!("Wallet: {}", wallet);
-        }
-
-        GameCommands::Forfeit { game_id, wallet } => {
-            let _game_uuid = Uuid::parse_str(&game_id)
-                .map_err(|_| arkive_core::ArkiveError::config("Invalid game ID format"))?;
-            let _wallet_instance = manager.load_wallet(&wallet).await?;
-
-            // TODO: Implement forfeit logic
-            println!("Forfeit functionality coming soon!");
-            println!("Game ID: {}", game_id);
-            println!("Wallet: {}", wallet);
-        }
-
-        GameCommands::Delete { game_id } => {
-            let game_uuid = Uuid::parse_str(&game_id)
-                .map_err(|_| arkive_core::ArkiveError::config("Invalid game ID format"))?;
-
-            if !game_manager.game_exists(game_uuid).await {
-                println!("Game {} not found.", game_id);
-                return Ok(());
-            }
-
-            game_manager
-                .delete_game(game_uuid)
-                .await
-                .map_err(map_gaming_error)?;
-            println!("Game {} deleted successfully.", game_id);
         }
     }
 
     Ok(())
-}
-
-/// Extract game status from stored state
-fn extract_game_status(stored_state: &StoredGameState) -> String {
-    if let Ok(game_info) = serde_json::from_value::<serde_json::Value>(stored_state.state.clone()) {
-        if let Some(state) = game_info.get("state") {
-            match state.as_str() {
-                Some("WaitingForPlayers") => "Waiting for Players".to_string(),
-                Some("WaitingForBets") => "Waiting for Bets".to_string(),
-                Some("BetsCollected") => "Bets Collected".to_string(),
-                Some("InProgress") => "In Progress".to_string(),
-                Some(s) if s.starts_with("Completed") => "Completed".to_string(),
-                Some(s) if s.starts_with("Aborted") => "Aborted".to_string(),
-                _ => "Unknown".to_string(),
-            }
-        } else {
-            "Unknown".to_string()
-        }
-    } else {
-        "Unknown".to_string()
-    }
 }

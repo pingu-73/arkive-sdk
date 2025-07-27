@@ -1,0 +1,490 @@
+{
+  "contractName": "TwoPlayerLottery",
+  "constructorInputs": [
+    {
+      "name": "player1",
+      "type": "pubkey"
+    },
+    {
+      "name": "player2", 
+      "type": "pubkey"
+    },
+    {
+      "name": "server",
+      "type": "pubkey"
+    },
+    {
+      "name": "commitment1",
+      "type": "bytes"
+    },
+    {
+      "name": "commitment2",
+      "type": "bytes"
+    },
+    {
+      "name": "betAmount",
+      "type": "int"
+    },
+    {
+      "name": "gameTimeout",
+      "type": "int"
+    }
+  ],
+  "functions": [
+    {
+      "name": "player1Wins",
+      "functionInputs": [
+        {
+          "name": "player1Sig",
+          "type": "signature"
+        },
+        {
+          "name": "value1",
+          "type": "int"
+        },
+        {
+          "name": "nonce1",
+          "type": "bytes"
+        },
+        {
+          "name": "value2",
+          "type": "int"
+        },
+        {
+          "name": "nonce2",
+          "type": "bytes"
+        }
+      ],
+      "serverVariant": true,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "serverSignature"
+        }
+      ],
+      "asm": [
+        "<player1Sig>",
+        "<player1>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<value1>",
+        "<nonce1>",
+        "OP_CAT",
+        "OP_SHA256",
+        "<commitment1>",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<value2>",
+        "<nonce2>",
+        "OP_CAT", 
+        "OP_SHA256",
+        "<commitment2>",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<value1>",
+        "<value2>",
+        "OP_XOR",
+        "OP_2",
+        "OP_MOD",
+        "OP_0",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<SERVER_KEY>",
+        "<serverSig>",
+        "OP_CHECKSIG"
+      ]
+    },
+    {
+      "name": "player1Wins",
+      "functionInputs": [
+        {
+          "name": "player1Sig",
+          "type": "signature"
+        },
+        {
+          "name": "value1",
+          "type": "int"
+        },
+        {
+          "name": "nonce1",
+          "type": "bytes"
+        },
+        {
+          "name": "value2",
+          "type": "int"
+        },
+        {
+          "name": "nonce2",
+          "type": "bytes"
+        }
+      ],
+      "serverVariant": false,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "older",
+          "message": "Exit timelock of 144 blocks"
+        }
+      ],
+      "asm": [
+        "<player1Sig>",
+        "<player1>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<value1>",
+        "<nonce1>",
+        "OP_CAT",
+        "OP_SHA256",
+        "<commitment1>",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<value2>",
+        "<nonce2>",
+        "OP_CAT",
+        "OP_SHA256", 
+        "<commitment2>",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<value1>",
+        "<value2>",
+        "OP_XOR",
+        "OP_2",
+        "OP_MOD",
+        "OP_0",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "144",
+        "OP_CHECKLOCKTIMEVERIFY",
+        "OP_DROP"
+      ]
+    },
+    {
+      "name": "player2Wins",
+      "functionInputs": [
+        {
+          "name": "player2Sig",
+          "type": "signature"
+        },
+        {
+          "name": "value1",
+          "type": "int"
+        },
+        {
+          "name": "nonce1",
+          "type": "bytes"
+        },
+        {
+          "name": "value2",
+          "type": "int"
+        },
+        {
+          "name": "nonce2",
+          "type": "bytes"
+        }
+      ],
+      "serverVariant": true,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "serverSignature"
+        }
+      ],
+      "asm": [
+        "<player2Sig>",
+        "<player2>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<value1>",
+        "<nonce1>",
+        "OP_CAT",
+        "OP_SHA256",
+        "<commitment1>",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<value2>",
+        "<nonce2>",
+        "OP_CAT",
+        "OP_SHA256",
+        "<commitment2>",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<value1>",
+        "<value2>",
+        "OP_XOR",
+        "OP_2",
+        "OP_MOD",
+        "OP_1",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<SERVER_KEY>",
+        "<serverSig>",
+        "OP_CHECKSIG"
+      ]
+    },
+    {
+      "name": "player2Wins",
+      "functionInputs": [
+        {
+          "name": "player2Sig",
+          "type": "signature"
+        },
+        {
+          "name": "value1",
+          "type": "int"
+        },
+        {
+          "name": "nonce1",
+          "type": "bytes"
+        },
+        {
+          "name": "value2",
+          "type": "int"
+        },
+        {
+          "name": "nonce2",
+          "type": "bytes"
+        }
+      ],
+      "serverVariant": false,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "older",
+          "message": "Exit timelock of 144 blocks"
+        }
+      ],
+      "asm": [
+        "<player2Sig>",
+        "<player2>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<value1>",
+        "<nonce1>",
+        "OP_CAT",
+        "OP_SHA256",
+        "<commitment1>",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<value2>",
+        "<nonce2>",
+        "OP_CAT",
+        "OP_SHA256",
+        "<commitment2>",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "<value1>",
+        "<value2>",
+        "OP_XOR",
+        "OP_2",
+        "OP_MOD",
+        "OP_1",
+        "OP_EQUAL",
+        "OP_VERIFY",
+        "144",
+        "OP_CHECKLOCKTIMEVERIFY",
+        "OP_DROP"
+      ]
+    },
+    {
+      "name": "player1TimeoutWin",
+      "functionInputs": [
+        {
+          "name": "player1Sig",
+          "type": "signature"
+        }
+      ],
+      "serverVariant": true,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "serverSignature"
+        }
+      ],
+      "asm": [
+        "<player1Sig>",
+        "<player1>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<SERVER_KEY>",
+        "<serverSig>",
+        "OP_CHECKSIG"
+      ]
+    },
+    {
+      "name": "player1TimeoutWin",
+      "functionInputs": [
+        {
+          "name": "player1Sig",
+          "type": "signature"
+        }
+      ],
+      "serverVariant": false,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "older",
+          "message": "Exit timelock of 144 blocks"
+        }
+      ],
+      "asm": [
+        "<player1Sig>",
+        "<player1>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "144",
+        "OP_CHECKLOCKTIMEVERIFY",
+        "OP_DROP"
+      ]
+    },
+    {
+      "name": "player2TimeoutWin",
+      "functionInputs": [
+        {
+          "name": "player2Sig",
+          "type": "signature"
+        }
+      ],
+      "serverVariant": true,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "serverSignature"
+        }
+      ],
+      "asm": [
+        "<player2Sig>",
+        "<player2>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<SERVER_KEY>",
+        "<serverSig>",
+        "OP_CHECKSIG"
+      ]
+    },
+    {
+      "name": "player2TimeoutWin",
+      "functionInputs": [
+        {
+          "name": "player2Sig",
+          "type": "signature"
+        }
+      ],
+      "serverVariant": false,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "older",
+          "message": "Exit timelock of 144 blocks"
+        }
+      ],
+      "asm": [
+        "<player2Sig>",
+        "<player2>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "144",
+        "OP_CHECKLOCKTIMEVERIFY",
+        "OP_DROP"
+      ]
+    },
+    {
+      "name": "mutualAbort",
+      "functionInputs": [
+        {
+          "name": "player1Sig",
+          "type": "signature"
+        },
+        {
+          "name": "player2Sig",
+          "type": "signature"
+        }
+      ],
+      "serverVariant": true,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "signature"
+        },
+        {
+          "type": "serverSignature"
+        }
+      ],
+      "asm": [
+        "<player1Sig>",
+        "<player1>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<player2Sig>",
+        "<player2>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<SERVER_KEY>",
+        "<serverSig>",
+        "OP_CHECKSIG"
+      ]
+    },
+    {
+      "name": "mutualAbort",
+      "functionInputs": [
+        {
+          "name": "player1Sig",
+          "type": "signature"
+        },
+        {
+          "name": "player2Sig",
+          "type": "signature"
+        }
+      ],
+      "serverVariant": false,
+      "require": [
+        {
+          "type": "signature"
+        },
+        {
+          "type": "signature"
+        },
+        {
+          "type": "older",
+          "message": "Exit timelock of 144 blocks"
+        }
+      ],
+      "asm": [
+        "<player1Sig>",
+        "<player1>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "<player2Sig>",
+        "<player2>",
+        "OP_CHECKSIG",
+        "OP_VERIFY",
+        "144",
+        "OP_CHECKLOCKTIMEVERIFY",
+        "OP_DROP"
+      ]
+    }
+  ],
+  "source": "// contract for two-player lottery, `arkade-os/compiler` wasn't able to gnerate properly so manually had to generate it",
+  "compiler": {
+    "name": "arkive-gaming",
+    "version": "0.1.0"
+  },
+  "updatedAt": "2025-01-27T00:00:00.000000+00:00"
+}

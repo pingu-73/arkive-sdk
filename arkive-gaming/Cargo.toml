@@ -8,18 +8,27 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 arkive-core = { path = "../arkive-core" }
+
+# Arkade Compiler Integration
+arkade-compiler = { git = "https://github.com/arkade-os/compiler", rev = "44a80412c5102797a7654501d6aabb04ac89595b" }
+
+# Cryptography and Bitcoin
 bitcoin = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+ark-core = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# Async and utilities
 tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true, features = ["serde"] }
-sha2 = "0.10"
-hex = "0.4"
-rand = "0.8"
 tracing = { workspace = true }
-async-trait = "0.1"
+rand = "0.8"
 
-dirs = "5.0" # for file based storage, subject to change in future
+# Process execution for compiler
+tokio-process = "0.2"
+tempfile = { workspace = true }

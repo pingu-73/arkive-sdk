@@ -1,86 +1,63 @@
-use crate::Result;
-use arkive_core::{Amount, ArkWallet};
+use ark_core::ArkAddress;
+use bitcoin::key::Keypair;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use uuid::Uuid;
 
-pub type PlayerId = Uuid;
-
-/// Player state in any game
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PlayerState {
-    Joined,
-    BetPlaced,
-    Committed,
-    Revealed,
-    Winner,
-    Loser,
-    Forfeited,
+#[derive(Debug, Clone)]
+pub struct Player {
+    pub id: String,
+    pub wallet_id: String,
+    pub ark_address: ArkAddress,
+    pub public_key: String, // Hex-encoded public key
+    pub joined_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Generic player for 2-player games
-#[derive(Clone)]
-pub struct Player {
-    id: PlayerId,
-    wallet: Arc<ArkWallet>,
-    state: PlayerState,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializablePlayer {
+    pub id: String,
+    pub wallet_id: String,
+    pub ark_address: String, // string 'coz ArkAddress isn't serializable
+    pub public_key: String,
+    pub joined_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Player {
-    pub async fn new(wallet: Arc<ArkWallet>) -> Result<Self> {
+    pub fn new(
+        id: String,
+        wallet_id: String,
+        ark_address: ArkAddress,
+        keypair: &Keypair,
+    ) -> Self {
+        let public_key = hex::encode(keypair.public_key().serialize());
+        
+        Self {
+            id,
+            wallet_id,
+            ark_address,
+            public_key,
+            joined_at: chrono::Utc::now(),
+        }
+    }
+
+    pub fn to_serializable(&self) -> SerializablePlayer {
+        SerializablePlayer {
+            id: self.id.clone(),
+            wallet_id: self.wallet_id.clone(),
+            ark_address: self.ark_address.to_string(),
+            public_key: self.public_key.clone(),
+            joined_at: self.joined_at,
+        }
+    }
+
+    pub fn from_serializable(serializable: SerializablePlayer) -> Result<Self, String> {
+        let ark_address = ArkAddress::decode(&serializable.ark_address)
+            .map_err(|e| format!("Invalid ark address: {}", e))?;
+
         Ok(Self {
-            id: Uuid::new_v4(),
-            wallet,
-            state: PlayerState::Joined,
+            id: serializable.id,
+            wallet_id: serializable.wallet_id,
+            ark_address,
+            public_key: serializable.public_key,
+            joined_at: serializable.joined_at,
         })
-    }
-
-    pub fn id(&self) -> PlayerId {
-        self.id
-    }
-
-    pub fn wallet(&self) -> &ArkWallet {
-        &self.wallet
-    }
-
-    pub fn state(&self) -> &PlayerState {
-        &self.state
-    }
-
-    pub fn set_state(&mut self, state: PlayerState) {
-        self.state = state;
-    }
-
-    /// Place a bet by sending to escrow addr
-    pub async fn place_bet(&self, escrow_address: &str, amount: Amount) -> Result<String> {
-        let txid = self.wallet.send_ark(escrow_address, amount).await?;
-        tracing::info!(
-            "Player {} placed bet of {} sats: {}",
-            self.id,
-            amount.to_sat(),
-            txid
-        );
-        Ok(txid)
-    }
-
-    /// Get player's current balance
-    pub async fn get_balance(&self) -> Result<arkive_core::Balance> {
-        Ok(self.wallet.balance().await?)
-    }
-
-    /// Get player's Ark addr for payouts
-    pub async fn get_ark_address(&self) -> Result<String> {
-        let addr = self.wallet.get_ark_address().await?;
-        Ok(addr.address)
-    }
-}
-
-impl std::fmt::Debug for Player {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Player")
-            .field("id", &self.id)
-            .field("state", &self.state)
-            .field("wallet", &"<ArkWallet>")
-            .finish()
     }
 }

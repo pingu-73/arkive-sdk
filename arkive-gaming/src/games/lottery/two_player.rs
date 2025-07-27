@@ -1,648 +1,791 @@
-use crate::{
-    commitment::{determine_winner, generate_secret, Commitment},
-    core::{Game, GameAction, GameResult, GameState, Player, PlayerId, PlayerState, StateManager},
-    escrow::{EscrowConditions, EscrowManager},
-    GamingError, Result,
-};
-use arkive_core::{Amount, ArkWallet};
-use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, Serialize};
+#![allow(unused_variables)]
+use crate::commitment::{Commitment, CommitmentData, CommitmentScheme, Reveal};
+use crate::contracts::manager::ContractManager;
+use crate::core::{GameState, Player, TwoPlayerLotteryState, GameResult, GameEndReason};
+use crate::error::{GamingError, Result};
+use crate::escrow::manager::{EscrowManager, LotteryEscrow, PayoutRevealData};
+use crate::storage::GameStorage;
+use arkive_core::WalletManager;
+use bitcoin::Amount;
 use std::collections::HashMap;
 use std::sync::Arc;
-use uuid::Uuid;
+use tokio::sync::RwLock;
 
-/// 2-Player Lottery Game impl
-#[derive(Debug)]
+#[allow(dead_code)]
 pub struct TwoPlayerLottery {
-    id: Uuid,
-    bet_amount: Amount,
-    state_manager: StateManager,
-    players: HashMap<PlayerId, LotteryPlayer>,
-    escrow_manager: EscrowManager,
-    escrow_id: Option<crate::escrow::EscrowId>,
-    game_result: Option<GameResult>,
+    wallet_manager: Arc<WalletManager>,
+    contract_manager: Arc<ContractManager>,
+    escrow_manager: Arc<EscrowManager>,
+    games: Arc<RwLock<HashMap<String, TwoPlayerLotteryState>>>,
+    escrows: Arc<RwLock<HashMap<String, LotteryEscrow>>>,
+    storage: GameStorage,
 }
-
-/// Lottery-specific player data
-#[derive(Debug, Clone)]
-pub struct LotteryPlayer {
-    core_player: Player,
-    commitment: Option<Commitment>,
-    revealed_secret: Option<Vec<u8>>,
-    secret: Option<Vec<u8>>, // Store secret for reveal phase
-}
-
-// impl std::fmt::Debug for LotteryPlayer {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         f.debug_struct("LotteryPlayer")
-//             .field("core_player", &self.core_player)
-//             .field("has_commitment", &self.commitment.is_some())
-//             .field("has_revealed", &self.revealed_secret.is_some())
-//             .field("has_secret", &self.secret.is_some())
-//             .finish()
-//     }
-// }
 
 impl TwoPlayerLottery {
-    pub async fn new(bet_amount: Amount, escrow_wallet: Arc<ArkWallet>) -> Result<Self> {
-        let game_id = Uuid::new_v4();
+    pub fn new(
+        wallet_manager: Arc<WalletManager>,
+        contract_manager: Arc<ContractManager>,
+        escrow_manager: Arc<EscrowManager>,
+    ) -> Self {
+        let storage = GameStorage::new("games.json");
 
-        Ok(Self {
-            id: game_id,
-            bet_amount,
-            state_manager: StateManager::new(),
-            players: HashMap::new(),
-            escrow_manager: EscrowManager::new(escrow_wallet),
-            escrow_id: None,
-            game_result: None,
-        })
+        Self {
+            wallet_manager,
+            contract_manager,
+            escrow_manager,
+            games: Arc::new(RwLock::new(HashMap::new())),
+            escrows: Arc::new(RwLock::new(HashMap::new())),
+            storage,
+        }
     }
 
-    pub fn bet_amount(&self) -> Amount {
-        self.bet_amount
+    pub async fn load_existing_games(&self) -> Result<()> {
+        let stored_games = self.storage.load_all_games().await?;
+        let mut games = self.games.write().await;
+        *games = stored_games;
+        Ok(())
     }
 
-    pub fn player_count(&self) -> usize {
-        self.players.len()
-    }
-
-    pub async fn get_escrow_address(&self) -> Result<String> {
-        self.escrow_manager.get_escrow_address().await
-    }
-
-    pub fn get_player(&self, player_id: PlayerId) -> Option<&LotteryPlayer> {
-        self.players.get(&player_id)
-    }
-
-    pub fn can_place_bet(&self, player_id: PlayerId) -> bool {
-        matches!(
-            self.state_manager.current_state(),
-            GameState::WaitingForBets
-        ) && self.players.contains_key(&player_id)
-            && matches!(
-                self.players.get(&player_id).unwrap().core_player.state(),
-                PlayerState::Joined
-            )
-    }
-
-    pub fn can_commit(&self, player_id: PlayerId) -> bool {
-        matches!(self.state_manager.current_state(), GameState::InProgress)
-            && self
-                .players
-                .get(&player_id)
-                .is_some_and(|p| p.commitment.is_none())
-    }
-
-    pub fn can_reveal(&self, player_id: PlayerId) -> bool {
-        matches!(self.state_manager.current_state(), GameState::InProgress)
-            && self
-                .players
-                .get(&player_id)
-                .is_some_and(|p| p.commitment.is_some() && p.revealed_secret.is_none())
-    }
-
-    /// Place bet for a player
-    async fn place_bet_internal(&mut self, player_id: PlayerId) -> Result<String> {
-        // check player balance and get escrow addr
-        let (balance, escrow_address) = {
-            let player = self
-                .players
-                .get(&player_id)
-                .ok_or(GamingError::PlayerNotFound(player_id))?;
-
-            let balance = player.core_player.get_balance().await?;
-            let escrow_address = self.get_escrow_address().await?;
-            (balance, escrow_address)
-        };
-
-        if balance.confirmed < self.bet_amount {
-            return Err(GamingError::InsufficientBalance {
-                need: self.bet_amount.to_sat(),
-                available: balance.confirmed.to_sat(),
+    /// Create a new two-player lottery game
+    pub async fn create_game(
+        &self,
+        game_id: String,
+        bet_amount: Amount,
+        creator_wallet: &str,
+        creator_ark_address: ark_core::ArkAddress,
+    ) -> Result<String> {
+        if bet_amount.to_sat() == 0 {
+            return Err(GamingError::InvalidBetAmount {
+                amount: bet_amount.to_sat(),
             });
         }
 
-        // get mutable ref to player and place bet
-        let player = self
-            .players
-            .get_mut(&player_id)
-            .ok_or(GamingError::PlayerNotFound(player_id))?;
+        // to get keypair info
+        let _wallet = self.wallet_manager.load_wallet(creator_wallet).await
+            .map_err(|e| GamingError::player(format!("Failed to load creator wallet: {}", e)))?;
 
-        // Place bet
-        let txid = player
-            .core_player
-            .place_bet(&escrow_address, self.bet_amount)
-            .await?;
+        // create player
+        let creator_player = Player::new(
+            "player1".to_string(),
+            creator_wallet.to_string(),
+            creator_ark_address,
+            &bitcoin::key::Keypair::new(&bitcoin::secp256k1::Secp256k1::new(), &mut rand::thread_rng()), // Placeholder
+        );
 
-        // Update player state
-        player.core_player.set_state(PlayerState::BetPlaced);
+        // create game state
+        let mut game_state = TwoPlayerLotteryState::new(game_id.clone(), bet_amount);
+        game_state.players.push(creator_player);
+        game_state.update_timestamp();
 
-        // Record deposit in escrow
-        if let Some(escrow_id) = self.escrow_id {
-            self.escrow_manager
-                .record_deposit(escrow_id, player_id, self.bet_amount, txid.clone())
-                .await?;
-        }
-
-        // Check if both players have bet
-        if self
-            .players
-            .values()
-            .all(|p| matches!(p.core_player.state(), PlayerState::BetPlaced))
+        // store game
         {
-            self.state_manager.transition_to(GameState::BetsCollected);
-            self.start_commitment_phase().await?;
+            let mut games = self.games.write().await;
+            games.insert(game_id.clone(), game_state.clone());
         }
+        
+        self.storage.save_game(&game_state).await?;
+        
+        tracing::info!(
+            "Created two-player lottery game {} with bet amount {} sats",
+            game_id,
+            bet_amount.to_sat()
+        );
+
+        Ok(game_id)
+    }
+
+    /// Join an existing game
+    pub async fn join_game(
+        &self,
+        game_id: &str,
+        joiner_wallet: &str,
+        joiner_ark_address: ark_core::ArkAddress,
+    ) -> Result<()> {
+        // Load from storage if not in memory
+        {
+            let games = self.games.read().await;
+            if !games.contains_key(game_id) {
+                drop(games);
+                
+                if let Some(game_state) = self.storage.load_game(game_id).await? {
+                    let mut games = self.games.write().await;
+                    games.insert(game_id.to_string(), game_state);
+                } else {
+                    return Err(GamingError::GameNotFound { game_id: game_id.to_string() });
+                }
+            }
+        }
+
+        let can_join = {
+            let games = self.games.read().await;
+            let game_state = games.get(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+            game_state.can_join()
+        };
+
+        if !can_join {
+            return Err(GamingError::GameAlreadyStarted);
+        }
+
+        // Load joiner wallet
+        let _wallet = self.wallet_manager.load_wallet(joiner_wallet).await
+            .map_err(|e| GamingError::player(format!("Failed to load joiner wallet: {}", e)))?;
+
+        // Create player
+        let joiner_player = Player::new(
+            "player2".to_string(),
+            joiner_wallet.to_string(),
+            joiner_ark_address,
+            &bitcoin::key::Keypair::new(&bitcoin::secp256k1::Secp256k1::new(), &mut rand::thread_rng()), // Placeholder
+        );
+
+        // Update game state
+        let should_create_escrow = {
+            let mut games = self.games.write().await;
+            let game_state = games.get_mut(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+
+            game_state.players.push(joiner_player);
+            game_state.update_timestamp();
+
+            // Check if we should create escrow
+            let should_create = game_state.is_ready_for_commitments();
+            if should_create {
+                game_state.state = GameState::WaitingForCommitments;
+                game_state.update_timestamp();
+            }
+            should_create
+        };
+
+        // Create escrow if needed (outside the lock)
+        if should_create_escrow {
+            self.create_escrow_for_game(game_id).await?;
+        }
+
+        {
+            let games = self.games.read().await;
+            if let Some(game_state) = games.get(game_id) {
+                self.storage.save_game(game_state).await?;
+            }
+        }
+
+        tracing::info!("Player joined game {}", game_id);
+        Ok(())
+    }
+
+    /// Create escrow for a game
+    async fn create_escrow_for_game(&self, game_id: &str) -> Result<()> {
+        let (player1_wallet, player2_wallet, mut game_state_clone) = {
+            let games = self.games.read().await;
+            let game_state = games.get(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+
+            if game_state.players.len() != 2 {
+                return Err(GamingError::escrow("Need exactly 2 players to create escrow"));
+            }
+
+            let player1_wallet = game_state.players[0].wallet_id.clone();
+            let player2_wallet = game_state.players[1].wallet_id.clone();
+            let game_state_clone = game_state.clone();
+
+            (player1_wallet, player2_wallet, game_state_clone)
+        };
+
+        let server_wallet = "server";
+
+        let escrow = self.escrow_manager.create_lottery_escrow(
+            &mut game_state_clone,
+            &player1_wallet,
+            &player2_wallet,
+            server_wallet,
+        ).await?;
+
+        // Store escrow
+        {
+            let mut escrows = self.escrows.write().await;
+            escrows.insert(game_id.to_string(), escrow);
+        }
+
+        // Update game state with escrow addr
+        {
+            let mut games = self.games.write().await;
+            if let Some(game_state) = games.get_mut(game_id) {
+                game_state.escrow_address = game_state_clone.escrow_address;
+                game_state.pot_amount = game_state_clone.pot_amount;
+                game_state.update_timestamp();
+            }
+        }
+
+        {
+            let games = self.games.read().await;
+            if let Some(game_state) = games.get(game_id) {
+                self.storage.save_game(game_state).await?;
+            }
+        }
+
+        tracing::info!("Created escrow for game {}", game_id);
+        Ok(())
+    }
+
+    /// Deposit funds to escrow
+    pub async fn deposit_funds(
+        &self,
+        game_id: &str,
+        player_id: &str,
+    ) -> Result<String> {
+        let (player_wallet, bet_amount) = {
+            let games = self.games.read().await;
+            let game_state = games.get(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+
+            let player = game_state.get_player(player_id)
+                .ok_or_else(|| GamingError::PlayerNotFound { player_id: player_id.to_string() })?;
+
+            (player.wallet_id.clone(), game_state.bet_amount)
+        };
+
+        let txid = {
+            let mut escrows = self.escrows.write().await;
+            let escrow = escrows.get_mut(game_id)
+                .ok_or_else(|| GamingError::escrow("Escrow not found for game"))?;
+
+            self.escrow_manager.deposit_to_escrow(
+                escrow,
+                &player_wallet,
+                player_id,
+                bet_amount,
+            ).await?
+        };
+
+        tracing::info!(
+            "Player {} deposited {} sats to game {} in transaction {}",
+            player_id,
+            bet_amount.to_sat(),
+            game_id,
+            txid
+        );
 
         Ok(txid)
     }
 
-    /// Start commitment phase
-    async fn start_commitment_phase(&mut self) -> Result<()> {
-        // Set commitment deadline (5 minutes)
-        let deadline = Utc::now() + Duration::minutes(5);
-        self.state_manager
-            .set_timeout("commitment".to_string(), deadline);
-
-        self.state_manager.transition_to(GameState::InProgress);
-
-        tracing::info!("Game {} started commitment phase", self.id);
-        Ok(())
-    }
-
     /// Submit commitment
-    async fn submit_commitment_internal(&mut self, player_id: PlayerId) -> Result<()> {
-        let player = self
-            .players
-            .get_mut(&player_id)
-            .ok_or(GamingError::PlayerNotFound(player_id))?;
+    pub async fn submit_commitment(
+        &self,
+        game_id: &str,
+        player_id: &str,
+    ) -> Result<(Commitment, CommitmentData)> {
+        let mut games = self.games.write().await;
+        let game_state = games.get_mut(game_id)
+            .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
 
-        if player.commitment.is_some() {
-            return Err(GamingError::CommitmentAlreadySubmitted);
+        if !matches!(game_state.state, GameState::WaitingForCommitments) {
+            return Err(GamingError::InvalidState {
+                expected: "WaitingForCommitments".to_string(),
+                found: format!("{:?}", game_state.state),
+            });
         }
 
-        // Generate secret and commitment
-        let secret = generate_secret();
-        let commitment = Commitment::create_with_secret(&secret, player_id);
-
-        player.commitment = Some(commitment);
-        player.secret = Some(secret);
-        player.core_player.set_state(PlayerState::Committed);
-
-        tracing::info!("Player {} submitted commitment", player_id);
-
-        // Check if both players have committed
-        if self.players.values().all(|p| p.commitment.is_some()) {
-            self.start_reveal_phase().await?;
+        if !game_state.is_player(player_id) {
+            return Err(GamingError::PlayerNotFound { player_id: player_id.to_string() });
         }
 
-        Ok(())
+        if game_state.has_committed(player_id) {
+            return Err(GamingError::game("Player has already committed"));
+        }
+
+        // Generate random value for commitment
+        let random_value = CommitmentScheme::generate_random_value();
+
+        // Create commitment
+        let (commitment, commitment_data) = CommitmentScheme::commit(
+            random_value,
+            player_id,
+            game_id,
+        )?;
+
+        // Verify this commitment is different from any existing ones (prevent replay attacks)
+        for existing_commitment in game_state.commitments.values() {
+            if !CommitmentScheme::verify_different_commitments(&commitment, existing_commitment) {
+                return Err(GamingError::CommitmentVerificationFailed {
+                    reason: "Duplicate commitment detected".to_string(),
+                });
+            }
+        }
+
+        // Store commitment
+        game_state.commitments.insert(player_id.to_string(), commitment.clone());
+        game_state.update_timestamp();
+
+        // Check if all players have committed
+        if game_state.all_committed() {
+            game_state.state = GameState::WaitingForReveals;
+            tracing::info!("All players committed for game {}, moving to reveal phase", game_id);
+        }
+
+        tracing::info!("Player {} submitted commitment for game {}", player_id, game_id);
+        Ok((commitment, commitment_data))
     }
 
-    /// Start reveal phase
-    async fn start_reveal_phase(&mut self) -> Result<()> {
-        // Clear commitment timeout and set reveal timeout
-        self.state_manager.clear_timeout("commitment");
-        let deadline = Utc::now() + Duration::minutes(5);
-        self.state_manager
-            .set_timeout("reveal".to_string(), deadline);
-
-        tracing::info!("Game {} started reveal phase", self.id);
-        Ok(())
-    }
-
-    /// Reveal commitment
-    async fn reveal_commitment_internal(
-        &mut self,
-        player_id: PlayerId,
-        secret: Vec<u8>,
+    /// Submit reveal
+    pub async fn submit_reveal(
+        &self,
+        game_id: &str,
+        player_id: &str,
+        commitment_data: CommitmentData,
     ) -> Result<()> {
-        let player = self
-            .players
-            .get_mut(&player_id)
-            .ok_or(GamingError::PlayerNotFound(player_id))?;
+        let should_finalize = {
+            let mut games = self.games.write().await;
+            let game_state = games.get_mut(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
 
-        let commitment = player
-            .commitment
-            .as_ref()
-            .ok_or(GamingError::InvalidCommitment)?;
-
-        // Verify secret matches commitment
-        if !commitment.verify_secret(&secret)? {
-            return Err(GamingError::InvalidCommitment);
-        }
-
-        player.revealed_secret = Some(secret);
-        player.core_player.set_state(PlayerState::Revealed);
-
-        tracing::info!("Player {} revealed commitment", player_id);
-
-        // Check if both players have revealed
-        if self.players.values().all(|p| p.revealed_secret.is_some()) {
-            self.determine_winner().await?;
-        }
-
-        Ok(())
-    }
-
-    /// Determine winner and complete game
-    async fn determine_winner(&mut self) -> Result<()> {
-        let player_ids: Vec<PlayerId> = self.players.keys().cloned().collect();
-        if player_ids.len() != 2 {
-            return Err(GamingError::Internal("Invalid player count".to_string()));
-        }
-
-        let player1_id = player_ids[0];
-        let player2_id = player_ids[1];
-
-        let player1 = &self.players[&player1_id];
-        let player2 = &self.players[&player2_id];
-
-        let secret1 = player1
-            .revealed_secret
-            .as_ref()
-            .ok_or(GamingError::CommitmentNotRevealed(player1_id))?;
-        let secret2 = player2
-            .revealed_secret
-            .as_ref()
-            .ok_or(GamingError::CommitmentNotRevealed(player2_id))?;
-
-        // Determine winner using XOR
-        let player1_wins = determine_winner(secret1, secret2);
-        let winner_id = if player1_wins { player1_id } else { player2_id };
-        let loser_id = if player1_wins { player2_id } else { player1_id };
-
-        // Update player states
-        self.players
-            .get_mut(&winner_id)
-            .unwrap()
-            .core_player
-            .set_state(PlayerState::Winner);
-        self.players
-            .get_mut(&loser_id)
-            .unwrap()
-            .core_player
-            .set_state(PlayerState::Loser);
-
-        // Create game result
-        let payout_amount = self.bet_amount * 2u64;
-        self.game_result = Some(GameResult {
-            winner: Some(winner_id),
-            payout_amount,
-            game_completed_at: Utc::now(),
-        });
-
-        // Update state
-        self.state_manager.transition_to(GameState::Completed {
-            winner: Some(winner_id),
-        });
-
-        // Payout winner
-        self.payout_winner(winner_id).await?;
-
-        tracing::info!("Game {} completed. Winner: {}", self.id, winner_id);
-        Ok(())
-    }
-
-    /// Payout winner
-    async fn payout_winner(&mut self, winner_id: PlayerId) -> Result<()> {
-        let winner = self
-            .players
-            .get(&winner_id)
-            .ok_or(GamingError::PlayerNotFound(winner_id))?;
-
-        let winner_address = winner.core_player.get_ark_address().await?;
-        let payout_amount = self.bet_amount * 2u64;
-
-        if let Some(escrow_id) = self.escrow_id {
-            let txid = self
-                .escrow_manager
-                .release_to_winner(escrow_id, winner_id, &winner_address)
-                .await?;
-
-            tracing::info!(
-                "Paid out {} sats to winner {}: {}",
-                payout_amount.to_sat(),
-                winner_id,
-                txid
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Handle timeout scenarios
-    async fn handle_timeout(&mut self, timeout_type: &str) -> Result<()> {
-        match timeout_type {
-            "commitment" => {
-                // Find players who haven't committed
-                let non_committed: Vec<PlayerId> = self
-                    .players
-                    .iter()
-                    .filter(|(_, player)| player.commitment.is_none())
-                    .map(|(id, _)| *id)
-                    .collect();
-
-                if non_committed.len() == 1 {
-                    // One player didn't commit, other wins by default
-                    let winner_id = self
-                        .players
-                        .iter()
-                        .find(|(_, player)| player.commitment.is_some())
-                        .map(|(id, _)| *id)
-                        .ok_or(GamingError::Internal("No committed players".to_string()))?;
-
-                    self.forfeit_players(&non_committed, winner_id).await?;
-                } else {
-                    self.abort_game("Commitment deadline expired".to_string())
-                        .await?;
-                }
+            if !matches!(game_state.state, GameState::WaitingForReveals) {
+                return Err(GamingError::InvalidState {
+                    expected: "WaitingForReveals".to_string(),
+                    found: format!("{:?}", game_state.state),
+                });
             }
-            "reveal" => {
-                // Find players who haven't revealed
-                let non_revealed: Vec<PlayerId> = self
-                    .players
-                    .iter()
-                    .filter(|(_, player)| player.revealed_secret.is_none())
-                    .map(|(id, _)| *id)
-                    .collect();
 
-                if non_revealed.len() == 1 {
-                    // One player didn't reveal, other wins by default
-                    let winner_id = self
-                        .players
-                        .iter()
-                        .find(|(_, player)| player.revealed_secret.is_some())
-                        .map(|(id, _)| *id)
-                        .ok_or(GamingError::Internal("No revealed players".to_string()))?;
-
-                    self.forfeit_players(&non_revealed, winner_id).await?;
-                } else {
-                    self.abort_game("Reveal deadline expired".to_string())
-                        .await?;
-                }
+            if !game_state.is_player(player_id) {
+                return Err(GamingError::PlayerNotFound { player_id: player_id.to_string() });
             }
-            _ => {}
-        }
 
-        Ok(())
-    }
-
-    /// Forfeit players and award winner
-    async fn forfeit_players(&mut self, forfeited: &[PlayerId], winner_id: PlayerId) -> Result<()> {
-        // Update player states
-        for &player_id in forfeited {
-            if let Some(player) = self.players.get_mut(&player_id) {
-                player.core_player.set_state(PlayerState::Forfeited);
+            if game_state.has_revealed(player_id) {
+                return Err(GamingError::game("Player has already revealed"));
             }
-        }
 
-        if let Some(winner) = self.players.get_mut(&winner_id) {
-            winner.core_player.set_state(PlayerState::Winner);
-        }
+            // Get the original commitment
+            let commitment = game_state.commitments.get(player_id)
+                .ok_or_else(|| GamingError::game("No commitment found for player"))?
+                .clone();
 
-        // Create game result
-        let payout_amount = self.bet_amount * 2u64;
-        self.game_result = Some(GameResult {
-            winner: Some(winner_id),
-            payout_amount,
-            game_completed_at: Utc::now(),
-        });
+            // Create reveal
+            let reveal = Reveal {
+                commitment_data,
+                timestamp: chrono::Utc::now(),
+            };
 
-        // Update state
-        self.state_manager.transition_to(GameState::Completed {
-            winner: Some(winner_id),
-        });
-
-        // Payout winner
-        self.payout_winner(winner_id).await?;
-
-        Ok(())
-    }
-
-    /// Abort game and refund
-    async fn abort_game(&mut self, reason: String) -> Result<()> {
-        self.state_manager.transition_to(GameState::Aborted {
-            reason: reason.clone(),
-        });
-
-        // Refund through escrow
-        if let Some(escrow_id) = self.escrow_id {
-            self.escrow_manager.refund_escrow(escrow_id, reason).await?;
-        }
-
-        tracing::warn!("Game {} aborted", self.id);
-        Ok(())
-    }
-}
-
-impl LotteryPlayer {
-    pub fn new(core_player: Player) -> Self {
-        Self {
-            core_player,
-            commitment: None,
-            revealed_secret: None,
-            secret: None,
-        }
-    }
-
-    pub fn get_secret(&self) -> Option<&Vec<u8>> {
-        self.secret.as_ref()
-    }
-
-    pub fn has_commitment(&self) -> bool {
-        self.commitment.is_some()
-    }
-
-    pub fn has_revealed(&self) -> bool {
-        self.revealed_secret.is_some()
-    }
-
-    pub fn core_player(&self) -> &Player {
-        &self.core_player
-    }
-}
-
-#[async_trait]
-impl Game for TwoPlayerLottery {
-    type GameState = GameState;
-    type Player = Player;
-    type GameResult = GameResult;
-
-    fn id(&self) -> Uuid {
-        self.id
-    }
-
-    fn state(&self) -> &Self::GameState {
-        self.state_manager.current_state()
-    }
-
-    async fn add_player(&mut self, player: Self::Player) -> Result<Uuid> {
-        if self.players.len() >= 2 {
-            return Err(GamingError::GameFull);
-        }
-
-        if !matches!(
-            self.state_manager.current_state(),
-            GameState::WaitingForPlayers
-        ) {
-            return Err(GamingError::InvalidState(
-                "Game not accepting players".to_string(),
-            ));
-        }
-
-        let player_id = player.id();
-        let lottery_player = LotteryPlayer::new(player);
-        self.players.insert(player_id, lottery_player);
-
-        tracing::info!("Player {} joined game {}", player_id, self.id);
-
-        // If we have 2 players, create escrow and move to betting phase
-        if self.players.len() == 2 {
-            let player_ids: Vec<Uuid> = self.players.keys().cloned().collect();
-            let escrow_id = self
-                .escrow_manager
-                .create_escrow(
-                    player_ids,
-                    EscrowConditions::GameCompletion { game_id: self.id },
-                )
-                .await?;
-
-            self.escrow_id = Some(escrow_id);
-            self.state_manager.transition_to(GameState::WaitingForBets);
-            tracing::info!("Game {} ready for betting phase", self.id);
-        }
-
-        Ok(player_id)
-    }
-
-    fn can_start(&self) -> bool {
-        self.players.len() == 2
-            && matches!(
-                self.state_manager.current_state(),
-                GameState::WaitingForBets
-            )
-    }
-
-    async fn start(&mut self) -> Result<()> {
-        if !self.can_start() {
-            return Err(GamingError::GameNotReady);
-        }
-
-        // Game starts when both players place bets
-        // This is handled automatically in place_bet_internal
-        Ok(())
-    }
-
-    async fn execute_action(&mut self, player_id: Uuid, action: GameAction) -> Result<()> {
-        match action {
-            GameAction::PlaceBet => {
-                if !self.can_place_bet(player_id) {
-                    return Err(GamingError::InvalidState(
-                        "Cannot place bet in current state".to_string(),
-                    ));
-                }
-                self.place_bet_internal(player_id).await?;
+            // Verify the reveal
+            if !CommitmentScheme::verify(&commitment, &reveal)? {
+                return Err(GamingError::CommitmentVerificationFailed {
+                    reason: "Reveal does not match commitment".to_string(),
+                });
             }
-            GameAction::SubmitCommitment { .. } => {
-                if !self.can_commit(player_id) {
-                    return Err(GamingError::InvalidState(
-                        "Cannot commit in current state".to_string(),
-                    ));
-                }
-                self.submit_commitment_internal(player_id).await?;
-            }
-            GameAction::RevealCommitment { secret } => {
-                if !self.can_reveal(player_id) {
-                    return Err(GamingError::InvalidState(
-                        "Cannot reveal in current state".to_string(),
-                    ));
-                }
-                self.reveal_commitment_internal(player_id, secret).await?;
-            }
-            GameAction::Forfeit => {
-                // Handle forfeit
-                let other_player_id = self
-                    .players
-                    .keys()
-                    .find(|&&id| id != player_id)
-                    .copied()
-                    .ok_or(GamingError::Internal("Other player not found".to_string()))?;
 
-                self.forfeit_players(&[player_id], other_player_id).await?;
-            }
-        }
+            // Store reveal
+            game_state.reveals.insert(player_id.to_string(), reveal);
+            game_state.update_timestamp();
 
-        Ok(())
-    }
-
-    async fn check_timeouts(&mut self) -> Result<()> {
-        let timeouts_to_check = vec!["commitment", "reveal"];
-
-        for timeout_name in timeouts_to_check {
-            if self.state_manager.check_timeout(timeout_name) {
-                self.handle_timeout(timeout_name).await?;
-                break; // Only handle one timeout at a time
-            }
-        }
-
-        Ok(())
-    }
-
-    fn get_result(&self) -> Option<&Self::GameResult> {
-        self.game_result.as_ref()
-    }
-
-    fn is_completed(&self) -> bool {
-        matches!(
-            self.state_manager.current_state(),
-            GameState::Completed { .. } | GameState::Aborted { .. }
-        )
-    }
-}
-
-/// Game information for external queries
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LotteryGameInfo {
-    pub id: Uuid,
-    pub bet_amount: Amount,
-    pub state: GameState,
-    pub player_count: usize,
-    pub escrow_address: Option<String>,
-    pub commitment_deadline: Option<DateTime<Utc>>,
-    pub reveal_deadline: Option<DateTime<Utc>>,
-    pub result: Option<GameResult>,
-}
-
-impl TwoPlayerLottery {
-    /// Get game information for display
-    pub async fn get_info(&self) -> Result<LotteryGameInfo> {
-        let escrow_address = if self.escrow_id.is_some() {
-            Some(self.get_escrow_address().await?)
-        } else {
-            None
+            // Check if all players have revealed
+            game_state.all_revealed()
         };
 
-        Ok(LotteryGameInfo {
-            id: self.id,
-            bet_amount: self.bet_amount,
-            state: self.state_manager.current_state().clone(),
-            player_count: self.players.len(),
-            escrow_address,
-            commitment_deadline: self.state_manager.get_timeout("commitment"),
-            reveal_deadline: self.state_manager.get_timeout("reveal"),
-            result: self.game_result.clone(),
-        })
+        if should_finalize {
+            self.finalize_game(game_id).await?;
+        }
+
+        tracing::info!("Player {} submitted reveal for game {}", player_id, game_id);
+        Ok(())
     }
 
-    /// Get escrow audit trail
-    pub fn get_audit_trail(&self) -> &crate::escrow::audit::AuditTrail {
-        self.escrow_manager.get_audit_trail()
+    /// Finalize the game and determine winner
+    async fn finalize_game(&self, game_id: &str) -> Result<()> {
+        // Get the data we need to determine winner
+        let (winner_id, winner_address, pot_amount) = {
+            let mut games = self.games.write().await;
+            let game_state = games.get_mut(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+
+            if !game_state.all_revealed() {
+                return Err(GamingError::game("Not all players have revealed"));
+            }
+
+            // Get reveals
+            let reveals: Vec<&Reveal> = game_state.reveals.values().collect();
+            if reveals.len() != 2 {
+                return Err(GamingError::game("Expected exactly 2 reveals"));
+            }
+
+            // Determine winner
+            let winner_id = CommitmentScheme::determine_winner(reveals[0], reveals[1])?;
+            
+            // Get winner info before we modify game_state
+            let winner_address = game_state.get_player(&winner_id)
+                .ok_or_else(|| GamingError::PlayerNotFound { player_id: winner_id.clone() })?
+                .ark_address.to_string();
+
+            let pot_amount = game_state.pot_amount;
+
+            // Create game result
+            let result = GameResult {
+                winner: Some(winner_id.clone()),
+                pot_amount,
+                transaction_id: None, // Will be set after payout
+                finished_at: chrono::Utc::now(),
+                reason: GameEndReason::NormalCompletion,
+            };
+
+            game_state.result = Some(result);
+            game_state.state = GameState::Finished;
+            game_state.update_timestamp();
+
+            (winner_id, winner_address, pot_amount)
+        };
+
+        // Execute payout (outside the lock)
+        self.execute_payout(game_id, &winner_id, &winner_address, pot_amount).await?;
+
+        tracing::info!(
+            "Game {} finished, winner: {}, pot: {} sats",
+            game_id,
+            winner_id,
+            pot_amount.to_sat()
+        );
+
+        Ok(())
     }
 
-    /// Check escrow balance
-    pub async fn check_escrow_balance(&self) -> Result<arkive_core::Balance> {
-        self.escrow_manager.check_balance().await
+    /// Execute payout to winner
+    async fn execute_payout(
+        &self,
+        game_id: &str,
+        winner_id: &str,
+        winner_address: &str,
+        amount: Amount,
+    ) -> Result<()> {
+        // Get reveal data for both players
+        let payout_data = {
+            let games = self.games.read().await;
+            let game_state = games.get(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+
+            let reveals: Vec<&Reveal> = game_state.reveals.values().collect();
+            if reveals.len() != 2 {
+                return Err(GamingError::game("Expected exactly 2 reveals"));
+            }
+
+            let reveal1 = reveals[0];
+            let reveal2 = reveals[1];
+
+            PayoutRevealData {
+                winner: winner_id.to_string(),
+                value1: reveal1.commitment_data.value,
+                nonce1: reveal1.commitment_data.nonce,
+                value2: reveal2.commitment_data.value,
+                nonce2: reveal2.commitment_data.nonce,
+            }
+        };
+
+        let txid = {
+            let escrows = self.escrows.read().await;
+            let escrow = escrows.get(game_id)
+                .ok_or_else(|| GamingError::escrow("Escrow not found for game"))?;
+
+            self.escrow_manager.execute_payout(
+                escrow,
+                winner_address,
+                amount,
+                payout_data,
+            ).await?
+        };
+
+        // Update game result with txID
+        {
+            let mut games = self.games.write().await;
+            if let Some(game_state) = games.get_mut(game_id) {
+                if let Some(ref mut result) = game_state.result {
+                    result.transaction_id = Some(txid.clone());
+                }
+                game_state.update_timestamp();
+            }
+        }
+
+        tracing::info!(
+            "Executed payout of {} sats to {} in transaction {}",
+            amount.to_sat(),
+            winner_address,
+            txid
+        );
+
+        Ok(())
     }
+
+    /// Handle game timeout
+    pub async fn handle_timeout(&self, game_id: &str) -> Result<()> {
+        // Determine timeout action
+        let timeout_action = {
+            let mut games = self.games.write().await;
+            let game_state = games.get_mut(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+
+            if game_state.is_finished() {
+                return Err(GamingError::game("Game is already finished"));
+            }
+
+            let now = chrono::Utc::now();
+            let mut timeout_action = TimeoutAction::None;
+
+            match game_state.state {
+                GameState::WaitingForCommitments => {
+                    if now > game_state.timeouts.commitment_timeout {
+                        // Find who committed and who didn't
+                        let committed_players: Vec<_> = game_state.players
+                            .iter()
+                            .filter(|p| game_state.has_committed(&p.id))
+                            .collect();
+
+                        if committed_players.len() == 1 {
+                            let winner_id = committed_players[0].id.clone();
+                            let winner_address = committed_players[0].ark_address.to_string();
+                            let pot_amount = game_state.pot_amount;
+
+                            let result = GameResult {
+                                winner: Some(winner_id.clone()),
+                                pot_amount,
+                                transaction_id: None,
+                                finished_at: chrono::Utc::now(),
+                                reason: GameEndReason::PlayerTimeout,
+                            };
+
+                            game_state.result = Some(result);
+                            game_state.state = GameState::Finished;
+                            game_state.update_timestamp();
+
+                            timeout_action = TimeoutAction::WinnerPayout { winner_id, winner_address, pot_amount };
+                        } else {
+                            // No one committed or both committed but timeout reached
+                            let result = GameResult {
+                                winner: None,
+                                pot_amount: Amount::ZERO,
+                                transaction_id: None,
+                                finished_at: chrono::Utc::now(),
+                                reason: GameEndReason::PlayerAbort,
+                            };
+
+                            game_state.result = Some(result);
+                            game_state.state = GameState::Aborted;
+                            game_state.update_timestamp();
+
+                            let player1_address = game_state.players[0].ark_address.to_string();
+                            let player2_address = game_state.players[1].ark_address.to_string();
+                            let refund_amount = game_state.bet_amount;
+
+                            timeout_action = TimeoutAction::MutualRefund { 
+                                player1_address, 
+                                player2_address, 
+                                refund_amount 
+                            };
+                        }
+                    }
+                }
+                GameState::WaitingForReveals => {
+                    if now > game_state.timeouts.reveal_timeout {
+                        // Find who revealed and who didn't
+                        let revealed_players: Vec<_> = game_state.players
+                            .iter()
+                            .filter(|p| game_state.has_revealed(&p.id))
+                            .collect();
+
+                        if revealed_players.len() == 1 {
+                            let winner_id = revealed_players[0].id.clone();
+                            let winner_address = revealed_players[0].ark_address.to_string();
+                            let pot_amount = game_state.pot_amount;
+
+                            let result = GameResult {
+                                winner: Some(winner_id.clone()),
+                                pot_amount,
+                                transaction_id: None,
+                                finished_at: chrono::Utc::now(),
+                                reason: GameEndReason::PlayerTimeout,
+                            };
+
+                            game_state.result = Some(result);
+                            game_state.state = GameState::Finished;
+                            game_state.update_timestamp();
+
+                            timeout_action = TimeoutAction::WinnerPayout { winner_id, winner_address, pot_amount };
+                        } else {
+                            // No one revealed or both revealed but timeout reached
+                            let result = GameResult {
+                                winner: None,
+                                pot_amount: Amount::ZERO,
+                                transaction_id: None,
+                                finished_at: chrono::Utc::now(),
+                                reason: GameEndReason::PlayerAbort,
+                            };
+
+                            game_state.result = Some(result);
+                            game_state.state = GameState::Aborted;
+                            game_state.update_timestamp();
+
+                            let player1_address = game_state.players[0].ark_address.to_string();
+                            let player2_address = game_state.players[1].ark_address.to_string();
+                            let refund_amount = game_state.bet_amount;
+
+                            timeout_action = TimeoutAction::MutualRefund { 
+                                player1_address, 
+                                player2_address, 
+                                refund_amount 
+                            };
+                        }
+                    }
+                }
+                _ => {
+                    if now > game_state.timeouts.game_timeout {
+                        let result = GameResult {
+                            winner: None,
+                            pot_amount: Amount::ZERO,
+                            transaction_id: None,
+                            finished_at: chrono::Utc::now(),
+                            reason: GameEndReason::PlayerAbort,
+                        };
+
+                        game_state.result = Some(result);
+                        game_state.state = GameState::Aborted;
+                        game_state.update_timestamp();
+
+                        let player1_address = game_state.players[0].ark_address.to_string();
+                        let player2_address = game_state.players[1].ark_address.to_string();
+                        let refund_amount = game_state.bet_amount;
+
+                        timeout_action = TimeoutAction::MutualRefund { 
+                            player1_address, 
+                            player2_address, 
+                            refund_amount 
+                        };
+                    }
+                }
+            }
+
+            timeout_action
+        };
+
+        // Execute timeout action (outside the lock)
+        match timeout_action {
+            TimeoutAction::WinnerPayout { winner_id, winner_address, pot_amount } => {
+                let escrows = self.escrows.read().await;
+                let escrow = escrows.get(game_id)
+                    .ok_or_else(|| GamingError::escrow("Escrow not found for game"))?;
+
+                let txid = self.escrow_manager.handle_timeout(escrow, &winner_id).await?;
+
+                // Update result with txID
+                {
+                    let mut games = self.games.write().await;
+                    if let Some(game_state) = games.get_mut(game_id) {
+                        if let Some(ref mut result) = game_state.result {
+                            result.transaction_id = Some(txid);
+                        }
+                    }
+                }
+
+                tracing::info!("Game {} ended by timeout, winner: {}", game_id, winner_id);
+            }
+            TimeoutAction::MutualRefund { player1_address, player2_address, refund_amount } => {
+                let escrows = self.escrows.read().await;
+                let escrow = escrows.get(game_id)
+                    .ok_or_else(|| GamingError::escrow("Escrow not found for game"))?;
+
+                let txid = self.escrow_manager.handle_mutual_abort(
+                    escrow,
+                    &player1_address,
+                    &player2_address,
+                    refund_amount,
+                ).await?;
+
+                // Update result with txID
+                {
+                    let mut games = self.games.write().await;
+                    if let Some(game_state) = games.get_mut(game_id) {
+                        if let Some(ref mut result) = game_state.result {
+                            result.transaction_id = Some(txid);
+                        }
+                    }
+                }
+
+                tracing::info!("Game {} aborted due to timeout, refunds issued", game_id);
+            }
+            TimeoutAction::None => {
+                // No timeout action needed
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get game state
+    pub async fn get_game_state(&self, game_id: &str) -> Result<TwoPlayerLotteryState> {
+        let games = self.games.read().await;
+        let game_state = games.get(game_id)
+            .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+
+        Ok(game_state.clone())
+    }
+
+    /// List all games
+    pub async fn list_games(&self) -> Result<Vec<TwoPlayerLotteryState>> {
+        let games = self.games.read().await;
+        Ok(games.values().cloned().collect())
+    }
+
+    /// Get games for a specific player
+    pub async fn get_player_games(&self, player_wallet: &str) -> Result<Vec<TwoPlayerLotteryState>> {
+        let games = self.games.read().await;
+        let player_games: Vec<_> = games.values()
+            .filter(|game| game.players.iter().any(|p| p.wallet_id == player_wallet))
+            .cloned()
+            .collect();
+
+        Ok(player_games)
+    }
+
+    /// Cleanup expired games
+    pub async fn cleanup_expired_games(&self) -> Result<usize> {
+        let mut games = self.games.write().await;
+        let mut escrows = self.escrows.write().await;
+        
+        let now = chrono::Utc::now();
+        let mut expired_games = Vec::new();
+
+        for (game_id, game_state) in games.iter() {
+            if !game_state.is_finished() && now > game_state.timeouts.game_timeout {
+                expired_games.push(game_id.clone());
+            }
+        }
+
+        for game_id in &expired_games {
+            // Handle timeout for each expired game
+            if let Some(mut game_state) = games.remove(game_id) {
+                game_state.state = GameState::Aborted;
+                game_state.result = Some(GameResult {
+                    winner: None,
+                    pot_amount: Amount::ZERO,
+                    transaction_id: None,
+                    finished_at: now,
+                    reason: GameEndReason::PlayerTimeout,
+                });
+                games.insert(game_id.clone(), game_state);
+            }
+
+            // Remove associated escrow
+            escrows.remove(game_id);
+        }
+
+        let count = expired_games.len();
+        tracing::info!("Cleaned up {} expired games", count);
+        Ok(count)
+    }
+}
+
+enum TimeoutAction {
+    None,
+    WinnerPayout {
+        winner_id: String,
+        winner_address: String,
+        pot_amount: Amount,
+    },
+    MutualRefund {
+        player1_address: String,
+        player2_address: String,
+        refund_amount: Amount,
+    },
 }

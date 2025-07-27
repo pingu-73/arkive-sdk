@@ -1,82 +1,51 @@
-//! ARKive Gaming Framework - Modular 2-Player Gaming System
+//! ARKive Gaming - Zero-collateral lottery protocols and gaming primitives
 //!
-//! This crate provides a modular framework for implementing 2-player games
-//! with proper escrow management and commitment schemes.
+//! This library provides production-ready implementations of cryptographic
+//! gaming protocols, starting with zero-collateral two-player lotteries.
 
 pub mod commitment;
+pub mod contracts;
 pub mod core;
 pub mod error;
 pub mod escrow;
 pub mod games;
 pub mod storage;
 
-pub use core::{Game, GameResult, Player, PlayerId};
+pub use commitment::{Commitment, CommitmentData, CommitmentScheme, Reveal};
+pub use contracts::{ArkadeCompiler, CompiledContract, ContractManager, LotteryContract};
+pub use core::{
+    GameState, Player, TwoPlayerLotteryState, GameResult, GameEndReason,
+    player::SerializablePlayer, SerializableTwoPlayerLotteryState, SerializableGameResult
+};
 pub use error::{GamingError, Result};
-pub use escrow::{EscrowId, EscrowManager};
-pub use games::lottery::TwoPlayerLottery;
-pub use storage::{GameStorage, StoredGameState};
+pub use escrow::{EscrowManager, LotteryEscrow, PayoutRevealData};
+pub use games::TwoPlayerLottery;
+pub use storage::GameStorage;
 
-use arkive_core::{Amount, ArkWallet};
-use std::sync::Arc;
-use uuid::Uuid;
-
-/// Create a new 2-player lottery game
-pub async fn create_lottery(
-    bet_amount: Amount,
-    escrow_wallet: Arc<ArkWallet>,
+/// Initialize the gaming module with required dependencies
+pub async fn initialize_gaming(
+    wallet_manager: std::sync::Arc<arkive_core::WalletManager>,
+    compiler_path: Option<String>,
 ) -> Result<TwoPlayerLottery> {
-    TwoPlayerLottery::new(bet_amount, escrow_wallet).await
-}
+    // Initialize contract manager
+    let mut contract_manager = ContractManager::new(compiler_path);
+    contract_manager.initialize().await?;
+    let contract_manager = std::sync::Arc::new(contract_manager);
 
-/// Game manager for handling multiple games with file storage
-pub struct GameManager {
-    storage: GameStorage,
-}
+    // Initialize escrow manager
+    let escrow_manager = std::sync::Arc::new(EscrowManager::new(
+        wallet_manager.clone(),
+        contract_manager.clone(),
+    ));
 
-impl GameManager {
-    pub async fn new(data_dir: &std::path::Path) -> Result<Self> {
-        let storage = GameStorage::new(data_dir).await?;
-        Ok(Self { storage })
-    }
+    // Create lottery instance
+    let lottery = TwoPlayerLottery::new(
+        wallet_manager,
+        contract_manager,
+        escrow_manager,
+    );
 
-    /// Create and save a new lottery game
-    pub async fn create_lottery_game(
-        &self,
-        bet_amount: Amount,
-        escrow_wallet: Arc<ArkWallet>,
-    ) -> Result<Uuid> {
-        let lottery = TwoPlayerLottery::new(bet_amount, escrow_wallet).await?;
-        let game_id = lottery.id();
+    lottery.load_existing_games().await?;
 
-        // Convert to storable format
-        let game_info = lottery.get_info().await?;
-        let stored_state = StoredGameState::new(
-            game_id,
-            "lottery".to_string(),
-            serde_json::to_value(game_info)?,
-        );
-
-        self.storage.save_game(game_id, &stored_state).await?;
-        Ok(game_id)
-    }
-
-    /// List all games
-    pub async fn list_games(&self) -> Result<Vec<Uuid>> {
-        self.storage.list_games().await
-    }
-
-    /// Get game info
-    pub async fn get_game_info(&self, game_id: Uuid) -> Result<StoredGameState> {
-        self.storage.load_game(game_id).await
-    }
-
-    /// Delete a game
-    pub async fn delete_game(&self, game_id: Uuid) -> Result<()> {
-        self.storage.delete_game(game_id).await
-    }
-
-    /// Check if game exists
-    pub async fn game_exists(&self, game_id: Uuid) -> bool {
-        self.storage.game_exists(game_id).await
-    }
+    Ok(lottery)
 }

@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct WalletManager {
     storage: Arc<Storage>,
     wallets: Arc<RwLock<HashMap<String, Arc<ArkWallet>>>>,

@@ -1,3 +1,3 @@
 pub mod lottery;
 
-pub use lottery::TwoPlayerLottery;
+pub use lottery::two_player::TwoPlayerLottery;

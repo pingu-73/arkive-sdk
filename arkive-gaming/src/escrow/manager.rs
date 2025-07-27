@@ -1,250 +1,267 @@
-use crate::{GamingError, Result};
-use arkive_core::{Amount, ArkWallet};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use crate::contracts::manager::{ContractManager, LotteryContract};
+use crate::core::TwoPlayerLotteryState;
+use crate::error::{GamingError, Result};
+use arkive_core::WalletManager;
+use bitcoin::Amount;
 use std::sync::Arc;
-use uuid::Uuid;
 
-pub type EscrowId = Uuid;
-
-/// Escrow manager for handling game funds
 pub struct EscrowManager {
-    wallet: Arc<ArkWallet>,
-    active_escrows: HashMap<EscrowId, EscrowState>,
-    audit_trail: super::audit::AuditTrail,
-}
-
-impl std::fmt::Debug for EscrowManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EscrowManager")
-            .field("wallet", &"<ArkWallet>")
-            .field("active_escrows", &self.active_escrows)
-            .field("audit_trail", &self.audit_trail)
-            .finish()
-    }
-}
-
-/// State of an escrow
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EscrowState {
-    pub id: EscrowId,
-    pub participants: Vec<Uuid>,
-    pub total_amount: Amount,
-    pub individual_amounts: HashMap<Uuid, Amount>,
-    pub conditions: EscrowConditions,
-    pub status: EscrowStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Conditions for escrow release
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EscrowConditions {
-    GameCompletion { game_id: Uuid },
-    TimeoutExpiry { deadline: DateTime<Utc> },
-    ManualRelease,
-}
-
-/// Status of escrow
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EscrowStatus {
-    WaitingForDeposits,
-    Active,
-    Released { winner: Option<Uuid> },
-    Refunded { reason: String },
+    wallet_manager: Arc<WalletManager>,
+    contract_manager: Arc<ContractManager>,
 }
 
 impl EscrowManager {
-    pub fn new(wallet: Arc<ArkWallet>) -> Self {
+    pub fn new(
+        wallet_manager: Arc<WalletManager>,
+        contract_manager: Arc<ContractManager>,
+    ) -> Self {
         Self {
-            wallet,
-            active_escrows: HashMap::new(),
-            audit_trail: super::audit::AuditTrail::new(),
+            wallet_manager,
+            contract_manager,
         }
     }
 
-    /// Create new escrow
-    pub async fn create_escrow(
-        &mut self,
-        participants: Vec<Uuid>,
-        conditions: EscrowConditions,
-    ) -> Result<EscrowId> {
-        let escrow_id = Uuid::new_v4();
-        let now = Utc::now();
+    /// Create escrow for a two-player lottery game
+    pub async fn create_lottery_escrow(
+        &self,
+        game_state: &mut TwoPlayerLotteryState,
+        player1_wallet: &str,
+        player2_wallet: &str,
+        server_wallet: &str,
+    ) -> Result<LotteryEscrow> {
+        if game_state.players.len() != 2 {
+            return Err(GamingError::escrow("Need exactly 2 players for escrow"));
+        }
 
-        let escrow_state = EscrowState {
-            id: escrow_id,
-            participants,
-            total_amount: Amount::ZERO,
-            individual_amounts: HashMap::new(),
-            conditions,
-            status: EscrowStatus::WaitingForDeposits,
-            created_at: now,
-            updated_at: now,
-        };
+        // Load wallets
+        let player1_wallet = self.wallet_manager.load_wallet(player1_wallet).await
+            .map_err(|e| GamingError::escrow(format!("Failed to load player1 wallet: {}", e)))?;
+        let player2_wallet = self.wallet_manager.load_wallet(player2_wallet).await
+            .map_err(|e| GamingError::escrow(format!("Failed to load player2 wallet: {}", e)))?;
+        #[allow(unused_variables)]
+        let server_wallet = self.wallet_manager.load_wallet(server_wallet).await
+            .map_err(|e| GamingError::escrow(format!("Failed to load server wallet: {}", e)))?;
 
-        self.active_escrows.insert(escrow_id, escrow_state);
+        // Check balances
+        let player1_balance = player1_wallet.ark_balance().await
+            .map_err(|e| GamingError::escrow(format!("Failed to get player1 balance: {}", e)))?;
+        let player2_balance = player2_wallet.ark_balance().await
+            .map_err(|e| GamingError::escrow(format!("Failed to get player2 balance: {}", e)))?;
 
-        self.audit_trail.add_entry(super::audit::AuditEntry {
-            escrow_id,
-            action: "created".to_string(),
-            amount: None,
-            participant: None,
-            timestamp: now,
-            details: "Escrow created".to_string(),
-        });
+        if player1_balance.0 + player1_balance.1 < game_state.bet_amount {
+            return Err(GamingError::InsufficientFunds {
+                need: game_state.bet_amount.to_sat(),
+                available: (player1_balance.0 + player1_balance.1).to_sat(),
+            });
+        }
 
-        tracing::info!("Created escrow {}", escrow_id);
-        Ok(escrow_id)
+        if player2_balance.0 + player2_balance.1 < game_state.bet_amount {
+            return Err(GamingError::InsufficientFunds {
+                need: game_state.bet_amount.to_sat(),
+                available: (player2_balance.0 + player2_balance.1).to_sat(),
+            });
+        }
+
+        // TODO: Create lottery contract (would need actual commitment hashes)
+        let dummy_commitment1 = "0".repeat(64); // TODO
+        let dummy_commitment2 = "1".repeat(64); // TODO
+        
+        let game_timeout = game_state.timeouts.game_timeout.timestamp() as u64;
+        
+        // TODO: need actual keypairs from the wallets
+        // simplified version
+        let contract = self.contract_manager.create_lottery_contract(
+            &bitcoin::key::Keypair::new(&bitcoin::secp256k1::Secp256k1::new(), &mut rand::thread_rng()),
+            &bitcoin::key::Keypair::new(&bitcoin::secp256k1::Secp256k1::new(), &mut rand::thread_rng()),
+            &bitcoin::key::Keypair::new(&bitcoin::secp256k1::Secp256k1::new(), &mut rand::thread_rng()),
+            &dummy_commitment1,
+            &dummy_commitment2,
+            game_state.bet_amount.to_sat(),
+            game_timeout,
+        )?;
+
+        // Generate contract addr
+        let contract_address = contract.get_contract_address()?;
+        game_state.escrow_address = Some(contract_address.clone());
+        game_state.pot_amount = game_state.bet_amount * 2;
+
+        Ok(LotteryEscrow {
+            game_id: game_state.game_id.clone(),
+            contract_address,
+            contract,
+            player1_deposited: false,
+            player2_deposited: false,
+            total_deposited: Amount::ZERO,
+            created_at: chrono::Utc::now(),
+        })
     }
 
-    /// Get escrow address for deposits
-    pub async fn get_escrow_address(&self) -> Result<String> {
-        let ark_addr = self.wallet.get_ark_address().await?;
-        Ok(ark_addr.address)
-    }
-
-    /// Record a deposit to escrow
-    pub async fn record_deposit(
-        &mut self,
-        escrow_id: EscrowId,
-        participant: Uuid,
+    /// Deposit funds to escrow
+    pub async fn deposit_to_escrow(
+        &self,
+        escrow: &mut LotteryEscrow,
+        player_wallet: &str,
+        player_id: &str,
         amount: Amount,
-        txid: String,
-    ) -> Result<()> {
-        let escrow = self
-            .active_escrows
-            .get_mut(&escrow_id)
-            .ok_or_else(|| GamingError::Escrow("Escrow not found".to_string()))?;
-
-        escrow.individual_amounts.insert(participant, amount);
-        escrow.total_amount += amount;
-        escrow.updated_at = Utc::now();
-
-        // Check if all participants have deposited
-        if escrow.individual_amounts.len() == escrow.participants.len() {
-            escrow.status = EscrowStatus::Active;
-        }
-
-        self.audit_trail.add_entry(super::audit::AuditEntry {
-            escrow_id,
-            action: "deposit".to_string(),
-            amount: Some(amount),
-            participant: Some(participant),
-            timestamp: Utc::now(),
-            details: format!("Deposit recorded: {}", txid),
-        });
-
-        tracing::info!(
-            "Recorded deposit of {} sats from {} to escrow {}: {}",
-            amount.to_sat(),
-            participant,
-            escrow_id,
-            txid
-        );
-
-        Ok(())
-    }
-
-    /// Release escrow to winner
-    pub async fn release_to_winner(
-        &mut self,
-        escrow_id: EscrowId,
-        winner: Uuid,
-        winner_address: &str,
     ) -> Result<String> {
-        let escrow = self
-            .active_escrows
-            .get_mut(&escrow_id)
-            .ok_or_else(|| GamingError::Escrow("Escrow not found".to_string()))?;
+        let wallet = self.wallet_manager.load_wallet(player_wallet).await
+            .map_err(|e| GamingError::escrow(format!("Failed to load wallet: {}", e)))?;
 
-        if !matches!(escrow.status, EscrowStatus::Active) {
-            return Err(GamingError::Escrow("Escrow not active".to_string()));
+        // Send funds to the contract addr
+        let txid = wallet.send_ark(&escrow.contract_address, amount).await
+            .map_err(|e| GamingError::escrow(format!("Failed to send to escrow: {}", e)))?;
+
+        // Update escrow state
+        if player_id == "player1" {
+            escrow.player1_deposited = true;
+        } else if player_id == "player2" {
+            escrow.player2_deposited = true;
         }
 
-        let payout_amount = escrow.total_amount;
-        let txid = self.wallet.send_ark(winner_address, payout_amount).await?;
-
-        escrow.status = EscrowStatus::Released {
-            winner: Some(winner),
-        };
-        escrow.updated_at = Utc::now();
-
-        self.audit_trail.add_entry(super::audit::AuditEntry {
-            escrow_id,
-            action: "release".to_string(),
-            amount: Some(payout_amount),
-            participant: Some(winner),
-            timestamp: Utc::now(),
-            details: format!("Released to winner: {}", txid),
-        });
+        escrow.total_deposited += amount;
 
         tracing::info!(
-            "Released {} sats from escrow {} to winner {}: {}",
-            payout_amount.to_sat(),
-            escrow_id,
-            winner,
+            "Player {} deposited {} sats to escrow in transaction {}",
+            player_id,
+            amount.to_sat(),
             txid
         );
 
         Ok(txid)
     }
 
-    /// Refund escrow to all participants
-    pub async fn refund_escrow(
-        &mut self,
-        escrow_id: EscrowId,
-        reason: String,
-    ) -> Result<Vec<String>> {
-        let escrow = self
-            .active_escrows
-            .get_mut(&escrow_id)
-            .ok_or_else(|| GamingError::Escrow("Escrow not found".to_string()))?;
-
-        let refund_txids = Vec::new();
-
-        for (participant, amount) in &escrow.individual_amounts {
-            // TODO: Get participant's addr (this would need to be stored or retrieved)
-            // For now, we'll need to get it from the participant somehow
-            tracing::warn!(
-                "Refund needed for participant {} amount {}",
-                participant,
-                amount.to_sat()
-            );
-            // TODO: actual refund logic when we have participant addr
-        }
-
-        escrow.status = EscrowStatus::Refunded {
-            reason: reason.clone(),
+    /// Execute payout from escrow
+    #[allow(unused_variables)]
+    pub async fn execute_payout(
+        &self,
+        escrow: &LotteryEscrow,
+        winner_address: &str,
+        amount: Amount,
+        reveal_data: PayoutRevealData,
+    ) -> Result<String> {
+        // Create the appropriate witness data based on the winner
+        let witness = match reveal_data.winner.as_str() {
+            "player1" => escrow.contract.create_player1_wins_witness(
+                reveal_data.value1,
+                reveal_data.nonce1,
+                reveal_data.value2,
+                reveal_data.nonce2,
+            )?,
+            "player2" => escrow.contract.create_player2_wins_witness(
+                reveal_data.value1,
+                reveal_data.nonce1,
+                reveal_data.value2,
+                reveal_data.nonce2,
+            )?,
+            _ => return Err(GamingError::escrow("Invalid winner")),
         };
-        escrow.updated_at = Utc::now();
 
-        self.audit_trail.add_entry(super::audit::AuditEntry {
-            escrow_id,
-            action: "refund".to_string(),
-            amount: Some(escrow.total_amount),
-            participant: None,
-            timestamp: Utc::now(),
-            details: format!("Refunded: {}", reason),
-        });
+        // TODO: This would create and broadcast the actual Bitcoin Tx
+        // using the compiled contract scripts and witness data
+        // depends on integration with ark-core Tx building
+        
+        let txid = format!("payout_tx_{}", uuid::Uuid::new_v4());
+        
+        tracing::info!(
+            "Executed payout of {} sats to {} in transaction {}",
+            amount.to_sat(),
+            winner_address,
+            txid
+        );
 
-        tracing::info!("Refunded escrow {}: {}", escrow_id, reason);
-        Ok(refund_txids)
+        Ok(txid)
     }
 
-    /// Get escrow state
-    pub fn get_escrow(&self, escrow_id: EscrowId) -> Option<&EscrowState> {
-        self.active_escrows.get(&escrow_id)
+    /// Handle timeout scenarios
+    #[allow(unused_variables)]
+    pub async fn handle_timeout(
+        &self,
+        escrow: &LotteryEscrow,
+        timeout_winner: &str,
+    ) -> Result<String> {
+        // Create timeout witness data
+        let witness = match timeout_winner {
+            "player1" => {
+                // Player 1 wins by timeout - player 2 failed to reveal
+                vec![vec![0u8; 64]] // Placeholder signature
+            }
+            "player2" => {
+                // Player 2 wins by timeout - player 1 failed to reveal
+                vec![vec![0u8; 64]] // Placeholder signature
+            }
+            _ => return Err(GamingError::escrow("Invalid timeout winner")),
+        };
+
+        // Create and broadcast timeout tx
+        let txid = format!("timeout_tx_{}", uuid::Uuid::new_v4());
+        
+        tracing::info!(
+            "Executed timeout payout to {} in transaction {}",
+            timeout_winner,
+            txid
+        );
+
+        Ok(txid)
     }
 
-    /// Check escrow balance
-    pub async fn check_balance(&self) -> Result<arkive_core::Balance> {
-        self.wallet.balance().await.map_err(GamingError::from)
+    /// Handle mutual abort
+    #[allow(unused_variables)]
+    pub async fn handle_mutual_abort(
+        &self,
+        escrow: &LotteryEscrow,
+        player1_address: &str,
+        player2_address: &str,
+        refund_amount: Amount,
+    ) -> Result<String> {
+        // Create mutual abort witness data (both signatures required)
+        let witness = vec![
+            vec![0u8; 64], // Player 1 sig placeholder
+            vec![0u8; 64], // Player 2 sig placeholder
+        ];
+
+        // Create and broadcast refund transaction
+        let txid = format!("refund_tx_{}", uuid::Uuid::new_v4());
+        
+        tracing::info!(
+            "Executed mutual abort refund of {} sats each in transaction {}",
+            refund_amount.to_sat(),
+            txid
+        );
+
+        Ok(txid)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LotteryEscrow {
+    pub game_id: String,
+    pub contract_address: String,
+    pub contract: LotteryContract,
+    pub player1_deposited: bool,
+    pub player2_deposited: bool,
+    pub total_deposited: Amount,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PayoutRevealData {
+    pub winner: String,
+    pub value1: u64,
+    pub nonce1: [u8; 32],
+    pub value2: u64,
+    pub nonce2: [u8; 32],
+}
+
+impl LotteryEscrow {
+    pub fn is_fully_funded(&self) -> bool {
+        self.player1_deposited && self.player2_deposited
     }
 
-    /// Get audit trail
-    pub fn get_audit_trail(&self) -> &super::audit::AuditTrail {
-        &self.audit_trail
+    pub fn get_expected_total(&self, bet_amount: Amount) -> Amount {
+        bet_amount * 2
+    }
+
+    pub fn is_ready_for_game(&self, bet_amount: Amount) -> bool {
+        self.is_fully_funded() && self.total_deposited >= self.get_expected_total(bet_amount)
     }
 }

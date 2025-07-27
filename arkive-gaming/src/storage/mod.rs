@@ -1,109 +1,68 @@
-use crate::{GamingError, Result};
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use crate::core::{TwoPlayerLotteryState, SerializableTwoPlayerLotteryState};
+use crate::error::{GamingError, Result};
+use serde_json;
+use std::collections::HashMap;
+use std::path::Path;
 use tokio::fs;
-use uuid::Uuid;
 
-/// File-based storage for games
 pub struct GameStorage {
-    storage_dir: PathBuf,
+    storage_path: String,
 }
 
 impl GameStorage {
-    pub async fn new(data_dir: &Path) -> Result<Self> {
-        let storage_dir = data_dir.join("games");
-        fs::create_dir_all(&storage_dir).await?;
-
-        Ok(Self { storage_dir })
+    pub fn new(storage_path: &str) -> Self {
+        Self {
+            storage_path: storage_path.to_string(),
+        }
     }
 
-    /// Save game state to file
-    pub async fn save_game<T>(&self, game_id: Uuid, game_data: &T) -> Result<()>
-    where
-        T: Serialize,
-    {
-        let file_path = self.storage_dir.join(format!("{}.json", game_id));
-        let json_data = serde_json::to_string_pretty(game_data)?;
-        fs::write(file_path, json_data).await?;
+    pub async fn save_game(&self, game_state: &TwoPlayerLotteryState) -> Result<()> {
+        let games = self.load_all_games().await.unwrap_or_default();
+        let mut updated_games = games;
+        updated_games.insert(game_state.game_id.clone(), game_state.clone());
+
+        // Convert to serializable format
+        let serializable_games: HashMap<String, SerializableTwoPlayerLotteryState> = updated_games
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_serializable()))
+            .collect();
+
+        let json = serde_json::to_string_pretty(&serializable_games)?;
+        fs::write(&self.storage_path, json).await
+            .map_err(|e| GamingError::internal(format!("Failed to save games: {}", e)))?;
+
         Ok(())
     }
 
-    /// Load game state from file
-    pub async fn load_game<T>(&self, game_id: Uuid) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let file_path = self.storage_dir.join(format!("{}.json", game_id));
-
-        if !file_path.exists() {
-            return Err(GamingError::Internal(format!("Game {} not found", game_id)));
-        }
-
-        let json_data = fs::read_to_string(file_path).await?;
-        let game_data = serde_json::from_str(&json_data)?;
-        Ok(game_data)
+    pub async fn load_game(&self, game_id: &str) -> Result<Option<TwoPlayerLotteryState>> {
+        let games = self.load_all_games().await?;
+        Ok(games.get(game_id).cloned())
     }
 
-    /// List all saved games
-    pub async fn list_games(&self) -> Result<Vec<Uuid>> {
-        let mut games = Vec::new();
-        let mut entries = fs::read_dir(&self.storage_dir).await?;
+    pub async fn load_all_games(&self) -> Result<HashMap<String, TwoPlayerLotteryState>> {
+        if !Path::new(&self.storage_path).exists() {
+            return Ok(HashMap::new());
+        }
 
-        while let Some(entry) = entries.next_entry().await? {
-            if let Some(file_name) = entry.file_name().to_str() {
-                if file_name.ends_with(".json") {
-                    if let Some(game_id_str) = file_name.strip_suffix(".json") {
-                        if let Ok(game_id) = Uuid::parse_str(game_id_str) {
-                            games.push(game_id);
-                        }
-                    }
+        let content = fs::read_to_string(&self.storage_path).await
+            .map_err(|e| GamingError::internal(format!("Failed to read games: {}", e)))?;
+
+        let serializable_games: HashMap<String, SerializableTwoPlayerLotteryState> = serde_json::from_str(&content)
+            .map_err(|e| GamingError::internal(format!("Failed to parse games: {}", e)))?;
+
+        // Convert back to runtime format
+        let mut games = HashMap::new();
+        for (game_id, serializable_game) in serializable_games {
+            match TwoPlayerLotteryState::from_serializable(serializable_game) {
+                Ok(game_state) => {
+                    games.insert(game_id, game_state);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize game {}: {}", game_id, e);
                 }
             }
         }
 
         Ok(games)
-    }
-
-    /// Delete game file
-    pub async fn delete_game(&self, game_id: Uuid) -> Result<()> {
-        let file_path = self.storage_dir.join(format!("{}.json", game_id));
-        if file_path.exists() {
-            fs::remove_file(file_path).await?;
-        }
-        Ok(())
-    }
-
-    /// Check if game exists
-    pub async fn game_exists(&self, game_id: Uuid) -> bool {
-        let file_path = self.storage_dir.join(format!("{}.json", game_id));
-        file_path.exists()
-    }
-}
-
-/// Serializable game state for storage
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredGameState {
-    pub game_id: Uuid,
-    pub game_type: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub state: serde_json::Value,
-}
-
-impl StoredGameState {
-    pub fn new(game_id: Uuid, game_type: String, state: serde_json::Value) -> Self {
-        let now = chrono::Utc::now();
-        Self {
-            game_id,
-            game_type,
-            created_at: now,
-            updated_at: now,
-            state,
-        }
-    }
-
-    pub fn update_state(&mut self, state: serde_json::Value) {
-        self.state = state;
-        self.updated_at = chrono::Utc::now();
     }
 }

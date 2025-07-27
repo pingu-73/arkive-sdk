@@ -43,6 +43,11 @@ impl TwoPlayerLottery {
         let stored_games = self.storage.load_all_games().await?;
         let mut games = self.games.write().await;
         *games = stored_games;
+
+        let stored_escrows = self.storage.load_all_escrows(&self.contract_manager).await?;
+        let mut escrows = self.escrows.write().await;
+        *escrows = stored_escrows;
+
         Ok(())
     }
 
@@ -203,8 +208,9 @@ impl TwoPlayerLottery {
         // Store escrow
         {
             let mut escrows = self.escrows.write().await;
-            escrows.insert(game_id.to_string(), escrow);
+            escrows.insert(game_id.to_string(), escrow.clone());
         }
+        self.storage.save_escrow(&escrow).await?;
 
         // Update game state with escrow addr
         {
@@ -274,52 +280,62 @@ impl TwoPlayerLottery {
         game_id: &str,
         player_id: &str,
     ) -> Result<(Commitment, CommitmentData)> {
-        let mut games = self.games.write().await;
-        let game_state = games.get_mut(game_id)
-            .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
+        let (commitment, commitment_data, should_save) = {
+            let mut games = self.games.write().await;
+            let game_state = games.get_mut(game_id)
+                .ok_or_else(|| GamingError::GameNotFound { game_id: game_id.to_string() })?;
 
-        if !matches!(game_state.state, GameState::WaitingForCommitments) {
-            return Err(GamingError::InvalidState {
-                expected: "WaitingForCommitments".to_string(),
-                found: format!("{:?}", game_state.state),
-            });
-        }
-
-        if !game_state.is_player(player_id) {
-            return Err(GamingError::PlayerNotFound { player_id: player_id.to_string() });
-        }
-
-        if game_state.has_committed(player_id) {
-            return Err(GamingError::game("Player has already committed"));
-        }
-
-        // Generate random value for commitment
-        let random_value = CommitmentScheme::generate_random_value();
-
-        // Create commitment
-        let (commitment, commitment_data) = CommitmentScheme::commit(
-            random_value,
-            player_id,
-            game_id,
-        )?;
-
-        // Verify this commitment is different from any existing ones (prevent replay attacks)
-        for existing_commitment in game_state.commitments.values() {
-            if !CommitmentScheme::verify_different_commitments(&commitment, existing_commitment) {
-                return Err(GamingError::CommitmentVerificationFailed {
-                    reason: "Duplicate commitment detected".to_string(),
+            if !matches!(game_state.state, GameState::WaitingForCommitments) {
+                return Err(GamingError::InvalidState {
+                    expected: "WaitingForCommitments".to_string(),
+                    found: format!("{:?}", game_state.state),
                 });
             }
-        }
 
-        // Store commitment
-        game_state.commitments.insert(player_id.to_string(), commitment.clone());
-        game_state.update_timestamp();
+            if !game_state.is_player(player_id) {
+                return Err(GamingError::PlayerNotFound { player_id: player_id.to_string() });
+            }
 
-        // Check if all players have committed
-        if game_state.all_committed() {
-            game_state.state = GameState::WaitingForReveals;
-            tracing::info!("All players committed for game {}, moving to reveal phase", game_id);
+            if game_state.has_committed(player_id) {
+                return Err(GamingError::game("Player has already committed"));
+            }
+
+            // Generate random value for commitment
+            let random_value = CommitmentScheme::generate_random_value();
+
+            // Create commitment
+            let (commitment, commitment_data) = CommitmentScheme::commit(
+                random_value,
+                player_id,
+                game_id,
+            )?;
+
+            // Verify this commitment is different from any existing ones (prevent replay attacks)
+            for existing_commitment in game_state.commitments.values() {
+                if !CommitmentScheme::verify_different_commitments(&commitment, existing_commitment) {
+                    return Err(GamingError::CommitmentVerificationFailed {
+                        reason: "Duplicate commitment detected".to_string(),
+                    });
+                }
+            }
+
+            // Store commitment
+            game_state.commitments.insert(player_id.to_string(), commitment.clone());
+            game_state.update_timestamp();
+
+            // Check if all players have committed
+            let should_transition = game_state.all_committed();
+            if should_transition {
+                game_state.state = GameState::WaitingForReveals;
+                tracing::info!("All players committed for game {}, moving to reveal phase", game_id);
+            }
+            (commitment.clone(), commitment_data, true)
+        };
+        if should_save {
+            let games = self.games.read().await;
+            if let Some(game_state) = games.get(game_id) {
+                self.storage.save_game(game_state).await?;
+            }
         }
 
         tracing::info!("Player {} submitted commitment for game {}", player_id, game_id);
@@ -379,6 +395,13 @@ impl TwoPlayerLottery {
             game_state.all_revealed()
         };
 
+        {
+            let games = self.games.read().await;
+            if let Some(game_state) = games.get(game_id) {
+                self.storage.save_game(game_state).await?;
+            }
+        }
+
         if should_finalize {
             self.finalize_game(game_id).await?;
         }
@@ -433,6 +456,13 @@ impl TwoPlayerLottery {
 
         // Execute payout (outside the lock)
         self.execute_payout(game_id, &winner_id, &winner_address, pot_amount).await?;
+
+        {
+            let games = self.games.read().await;
+            if let Some(game_state) = games.get(game_id) {
+                self.storage.save_game(game_state).await?;
+            }
+        }
 
         tracing::info!(
             "Game {} finished, winner: {}, pot: {} sats",
@@ -499,6 +529,13 @@ impl TwoPlayerLottery {
             }
         }
 
+        {
+            let games = self.games.read().await;
+            if let Some(game_state) = games.get(game_id) {
+                self.storage.save_game(game_state).await?;
+            }
+        }
+        
         tracing::info!(
             "Executed payout of {} sats to {} in transaction {}",
             amount.to_sat(),

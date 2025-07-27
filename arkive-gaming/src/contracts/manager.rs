@@ -176,7 +176,10 @@ impl LotteryContract {
         let mut witness = Vec::new();
         
         // TODO: actual sig
-        let signature = self.sign_for_player1(&[])?;
+        // let signature = self.sign_for_player1(&[])?;
+        // witness.push(signature);
+        let message = format!("player1_wins_{}_{}", value1, value2);
+        let signature = self.sign_for_player1(message.as_bytes())?;
         witness.push(signature);
         
         witness.push(value1.to_le_bytes().to_vec());
@@ -198,7 +201,10 @@ impl LotteryContract {
         let mut witness = Vec::new();
         
         // TODO: actual sig
-        let signature = self.sign_for_player2(&[])?;
+        // let signature = self.sign_for_player2(&[])?;
+        // witness.push(signature);
+        let message = format!("player2_wins_{}_{}", value1, value2);
+        let signature = self.sign_for_player2(message.as_bytes())?;
         witness.push(signature);
         
         witness.push(value1.to_le_bytes().to_vec());
@@ -211,8 +217,17 @@ impl LotteryContract {
 
     /// Sign a message for player 1
     fn sign_for_player1(&self, message: &[u8]) -> Result<Vec<u8>> {
+        use bitcoin::secp256k1::{Message, Secp256k1};
+        use sha2::{Digest, Sha256};
+        
         let secp = Secp256k1::new();
-        let msg = Message::from_digest_slice(message)
+        
+        // hash msg to ensure 32 bytes
+        let mut hasher = Sha256::new();
+        hasher.update(message);
+        let hash: [u8; 32] = hasher.finalize().into();
+        
+        let msg = Message::from_digest_slice(&hash)
             .map_err(|e| GamingError::internal(format!("Invalid message: {}", e)))?;
         
         let signature = secp.sign_schnorr_no_aux_rand(&msg, &self.player1_keypair);
@@ -221,8 +236,17 @@ impl LotteryContract {
 
     /// Sign a message for player 2
     fn sign_for_player2(&self, message: &[u8]) -> Result<Vec<u8>> {
+        use bitcoin::secp256k1::{Message, Secp256k1};
+        use sha2::{Digest, Sha256};
+        
         let secp = Secp256k1::new();
-        let msg = Message::from_digest_slice(message)
+        
+        // hash msg to ensure 32 bytes
+        let mut hasher = Sha256::new();
+        hasher.update(message);
+        let hash: [u8; 32] = hasher.finalize().into();
+        
+        let msg = Message::from_digest_slice(&hash)
             .map_err(|e| GamingError::internal(format!("Invalid message: {}", e)))?;
         
         let signature = secp.sign_schnorr_no_aux_rand(&msg, &self.player2_keypair);

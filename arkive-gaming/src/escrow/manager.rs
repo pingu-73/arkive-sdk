@@ -4,6 +4,7 @@ use crate::error::{GamingError, Result};
 use arkive_core::WalletManager;
 use bitcoin::Amount;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 
 pub struct EscrowManager {
     wallet_manager: Arc<WalletManager>,
@@ -232,6 +233,18 @@ impl EscrowManager {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableLotteryEscrow {
+    pub game_id: String,
+    pub contract_address: String,
+    pub player1_deposited: bool,
+    pub player2_deposited: bool,
+    pub total_deposited: u64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub contract_params: std::collections::HashMap<String, String>,
+}
+
+
 #[derive(Debug, Clone)]
 pub struct LotteryEscrow {
     pub game_id: String,
@@ -264,4 +277,71 @@ impl LotteryEscrow {
     pub fn is_ready_for_game(&self, bet_amount: Amount) -> bool {
         self.is_fully_funded() && self.total_deposited >= self.get_expected_total(bet_amount)
     }
+
+    pub fn to_serializable(&self) -> SerializableLotteryEscrow {
+        SerializableLotteryEscrow {
+            game_id: self.game_id.clone(),
+            contract_address: self.contract_address.clone(),
+            player1_deposited: self.player1_deposited,
+            player2_deposited: self.player2_deposited,
+            total_deposited: self.total_deposited.to_sat(),
+            created_at: self.created_at,
+            contract_params: self.contract.params.clone(),
+        }
+    }
+
+    pub fn from_serializable(
+        serializable: SerializableLotteryEscrow,
+        contract_manager: &ContractManager,
+    ) -> Result<Self> {
+        // Recreate the contract from stored parameters
+        let contract = recreate_contract_from_params(&serializable.contract_params, contract_manager)?;
+        
+        Ok(Self {
+            game_id: serializable.game_id,
+            contract_address: serializable.contract_address,
+            contract,
+            player1_deposited: serializable.player1_deposited,
+            player2_deposited: serializable.player2_deposited,
+            total_deposited: Amount::from_sat(serializable.total_deposited),
+            created_at: serializable.created_at,
+        })
+    }
+}
+
+#[allow(unused_variables)]
+fn recreate_contract_from_params(
+    params: &std::collections::HashMap<String, String>,
+    contract_manager: &ContractManager,
+) -> Result<LotteryContract> {
+    // Extract parameters
+    let player1_pubkey = params.get("player1").ok_or_else(|| GamingError::internal("Missing player1 pubkey"))?;
+    let player2_pubkey = params.get("player2").ok_or_else(|| GamingError::internal("Missing player2 pubkey"))?;
+    let server_pubkey = params.get("server").ok_or_else(|| GamingError::internal("Missing server pubkey"))?;
+    let commitment1 = params.get("commitment1").ok_or_else(|| GamingError::internal("Missing commitment1"))?;
+    let commitment2 = params.get("commitment2").ok_or_else(|| GamingError::internal("Missing commitment2"))?;
+    let bet_amount: u64 = params.get("betAmount")
+        .ok_or_else(|| GamingError::internal("Missing betAmount"))?
+        .parse()
+        .map_err(|_| GamingError::internal("Invalid betAmount"))?;
+    let game_timeout: u64 = params.get("gameTimeout")
+        .ok_or_else(|| GamingError::internal("Missing gameTimeout"))?
+        .parse()
+        .map_err(|_| GamingError::internal("Invalid gameTimeout"))?;
+
+    // Recreate keypairs
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let player1_keypair = bitcoin::key::Keypair::new(&secp, &mut rand::thread_rng()); // TODO: Placeholder
+    let player2_keypair = bitcoin::key::Keypair::new(&secp, &mut rand::thread_rng()); // TODO: Placeholder
+    let server_keypair = bitcoin::key::Keypair::new(&secp, &mut rand::thread_rng()); // TODO: Placeholder
+
+    contract_manager.create_lottery_contract(
+        &player1_keypair,
+        &player2_keypair,
+        &server_keypair,
+        commitment1,
+        commitment2,
+        bet_amount,
+        game_timeout,
+    )
 }

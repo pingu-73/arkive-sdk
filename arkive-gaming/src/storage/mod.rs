@@ -1,5 +1,7 @@
 use crate::core::{TwoPlayerLotteryState, SerializableTwoPlayerLotteryState};
 use crate::error::{GamingError, Result};
+use crate::escrow::{SerializableLotteryEscrow, LotteryEscrow};
+use crate::ContractManager;
 use serde_json;
 use std::collections::HashMap;
 use std::path::Path;
@@ -64,5 +66,50 @@ impl GameStorage {
         }
 
         Ok(games)
+    }
+
+    pub async fn save_escrow(&self, escrow: &LotteryEscrow) -> Result<()> {
+        let escrows = self.load_all_escrows_serializable().await.unwrap_or_default();
+        let mut updated_escrows = escrows;
+        updated_escrows.insert(escrow.game_id.clone(), escrow.to_serializable());
+        
+        let json = serde_json::to_string_pretty(&updated_escrows)?;
+        fs::write("escrows.json", json).await
+            .map_err(|e| GamingError::internal(format!("Failed to save escrows: {}", e)))?;
+        Ok(())
+    }
+
+    async fn load_all_escrows_serializable(&self) -> Result<HashMap<String, SerializableLotteryEscrow>> {
+        let escrow_path = "escrows.json";
+        
+        if !Path::new(escrow_path).exists() {
+            return Ok(HashMap::new());
+        }
+
+        let content = fs::read_to_string(escrow_path).await
+            .map_err(|e| GamingError::internal(format!("Failed to read escrows: {}", e)))?;
+
+        let escrows: HashMap<String, SerializableLotteryEscrow> = serde_json::from_str(&content)
+            .map_err(|e| GamingError::internal(format!("Failed to parse escrows: {}", e)))?;
+
+        Ok(escrows)
+    }
+
+    pub async fn load_all_escrows(&self, contract_manager: &ContractManager) -> Result<HashMap<String, LotteryEscrow>> {
+        let serializable_escrows = self.load_all_escrows_serializable().await?;
+        
+        let mut escrows = HashMap::new();
+        for (game_id, serializable_escrow) in serializable_escrows {
+            match LotteryEscrow::from_serializable(serializable_escrow, contract_manager) {
+                Ok(escrow) => {
+                    escrows.insert(game_id, escrow);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize escrow for game {}: {}", game_id, e);
+                }
+            }
+        }
+
+        Ok(escrows)
     }
 }

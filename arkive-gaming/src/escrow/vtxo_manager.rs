@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 pub struct VtxoEscrowManager {
     wallet_manager: Arc<WalletManager>,
-    tapscript_manager: TapscriptManager,
+    pub tapscript_manager: TapscriptManager,
     storage: GameStorage,
 }
 
@@ -457,7 +457,10 @@ impl VtxoEscrowManager {
 
     async fn broadcast_ark_transaction(&self, tx: Transaction) -> Result<String> {
         // TODO: integrate for ark Tx broadcasting
-        todo!("todo integration with arkive-core")
+        // todo!("todo integration with arkive-core")
+        let mock_txid = format!("mock_payout_{}", chrono::Utc::now().timestamp());
+        tracing::info!("Mock broadcast: transaction {} (not actually broadcast)", mock_txid);
+        Ok(mock_txid)
     }
 
     // Signature methods (these need proper key management integration)
@@ -478,15 +481,18 @@ impl VtxoEscrowManager {
     }
 
     fn sign_for_player1(&self, _lottery_vtxo: &LotteryVtxo) -> Result<Vec<u8>> {
-        todo!("Sign for player1 - needs key management integration")
+        // todo!("Sign for player1 - needs key management integration")
+        Ok(vec![0x01; 64]) // TODO: replace mock with real
     }
 
     fn sign_for_player2(&self, _lottery_vtxo: &LotteryVtxo) -> Result<Vec<u8>> {
-        todo!("Sign for player2 - needs key management integration")
+        // todo!("Sign for player2 - needs key management integration")
+        Ok(vec![0x02; 64]) // TODO: replace mock with real
     }
 
     fn sign_for_server(&self, _lottery_vtxo: &LotteryVtxo) -> Result<Vec<u8>> {
-        todo!("Sign for server - needs key management integration")
+        // todo!("Sign for server - needs key management integration")
+        Ok(vec![0x03; 64]) // TODO: replace mock with real
     }
 }
 

@@ -8,6 +8,7 @@ use arkive_core::{ArkAddress, WalletManager};
 use bitcoin::Amount;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::str::FromStr;
 use tokio::sync::RwLock;
 
 pub struct TwoPlayerLottery {
@@ -536,10 +537,12 @@ impl TwoPlayerLottery {
         let mut games = self.games.write().await;
         *games = stored_games;
 
-        // We don't load VTXOs from storage anymore since they're managed differently
-        // VTXOs will be recreated when needed based on game state
-
         tracing::info!("Loaded {} existing games", games.len());
+
+        // load VTXOs into memory
+        drop(games);
+        self.load_existing_vtxos().await?;
+
         Ok(())
     }
 
@@ -969,6 +972,107 @@ impl TwoPlayerLottery {
         );
 
         Ok(())
+    }
+
+    /// Load existing VTXOs from storage into memory
+    async fn load_existing_vtxos(&self) -> Result<()> {
+        let games = self.games.read().await;
+        let mut vtxos = self.lottery_vtxos.write().await;
+        
+        for (game_id, game_state) in games.iter() {
+            // Skip if VTXO already in memory or game is finished
+            if vtxos.contains_key(game_id) || game_state.is_finished() {
+                continue;
+            }
+            
+            // Try to load VTXO data from storage
+            if let Some(vtxo_data) = self.vtxo_escrow_manager.load_vtxo_data(game_id).await? {
+                if !vtxo_data.is_spent {
+                    // Recreate the LotteryVtxo from storage data
+                    match self.recreate_lottery_vtxo_from_storage(&vtxo_data, game_state).await {
+                        Ok(lottery_vtxo) => {
+                            vtxos.insert(game_id.clone(), lottery_vtxo);
+                            tracing::info!("Reloaded VTXO for game: {}", game_id);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to recreate VTXO for game {}: {}", game_id, e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        tracing::info!("Loaded {} VTXOs into memory", vtxos.len());
+        Ok(())
+    }
+
+    /// Recreate LotteryVtxo from storage data
+    async fn recreate_lottery_vtxo_from_storage(
+        &self,
+        vtxo_data: &crate::storage::VtxoStorageData,
+        game_state: &crate::core::TwoPlayerLotteryState,
+    ) -> Result<crate::escrow::LotteryVtxo> {
+        // Parse stored public keys
+        let player1_pk = bitcoin::XOnlyPublicKey::from_str(&vtxo_data.player1_pk)
+            .map_err(|e| GamingError::internal(format!("Invalid player1 pubkey: {}", e)))?;
+        let player2_pk = bitcoin::XOnlyPublicKey::from_str(&vtxo_data.player2_pk)
+            .map_err(|e| GamingError::internal(format!("Invalid player2 pubkey: {}", e)))?;
+        let server_pk = bitcoin::XOnlyPublicKey::from_str(&vtxo_data.server_pk)
+            .map_err(|e| GamingError::internal(format!("Invalid server pubkey: {}", e)))?;
+
+        // Parse commitment hashes
+        let commitment1_hash = hex::decode(&vtxo_data.commitment1_hash)
+            .map_err(|e| GamingError::internal(format!("Invalid commitment1 hash: {}", e)))?;
+        let commitment2_hash = hex::decode(&vtxo_data.commitment2_hash)
+            .map_err(|e| GamingError::internal(format!("Invalid commitment2 hash: {}", e)))?;
+
+        let mut commitment1_bytes = [0u8; 32];
+        let mut commitment2_bytes = [0u8; 32];
+        commitment1_bytes.copy_from_slice(&commitment1_hash[..32]);
+        commitment2_bytes.copy_from_slice(&commitment2_hash[..32]);
+
+        // Recreate tapscripts
+        let bet_amount = bitcoin::Amount::from_sat(vtxo_data.bet_amount);
+        let timeout_delay_seconds = 24 * 60 * 60; // 24 hours
+        
+        let tapscripts = self.vtxo_escrow_manager.tapscript_manager.compile_lottery_scripts(
+            player1_pk,
+            player2_pk,
+            server_pk,
+            bet_amount,
+            commitment1_bytes,
+            commitment2_bytes,
+            timeout_delay_seconds,
+        )?;
+
+        // Recreate VTXO
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let exit_delay_seconds = 24 * 60 * 60;
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(exit_delay_seconds)
+            .map_err(|e| GamingError::internal(format!("Invalid exit delay: {}", e)))?;
+
+        let vtxo = ark_core::Vtxo::new_default(
+            &secp,
+            server_pk,
+            server_pk,
+            exit_delay,
+            bitcoin::Network::Regtest,
+        )
+        .map_err(|e| GamingError::internal(format!("Failed to recreate VTXO: {}", e)))?;
+
+        Ok(crate::escrow::LotteryVtxo {
+            game_id: vtxo_data.game_id.clone(),
+            vtxo,
+            tapscripts,
+            player1_pk,
+            player2_pk,
+            server_pk,
+            bet_amount,
+            total_amount: bet_amount * 2,
+            commitment1_hash: commitment1_bytes,
+            commitment2_hash: commitment2_bytes,
+            created_at: vtxo_data.created_at,
+        })
     }
 }
 

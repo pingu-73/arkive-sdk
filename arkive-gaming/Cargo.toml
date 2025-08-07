@@ -5,12 +5,13 @@ edition = "2021"
 description = "Modular gaming framework for ARKive SDK"
 authors = ["Dikshant <dikshant.073@gmail.com>"]
 license = "MIT OR Apache-2.0"
+build = "./build.rs"
 
 [dependencies]
 arkive-core = { path = "../arkive-core" }
 
-# Arkade Compiler Integration
-arkade-compiler = { git = "https://github.com/arkade-os/compiler", rev = "44a80412c5102797a7654501d6aabb04ac89595b" }
+elements-miniscript = { git = "https://github.com/ElementsProject/elements-miniscript" }
+elements = "0.25.0"
 
 # Cryptography and Bitcoin
 bitcoin = { workspace = true }

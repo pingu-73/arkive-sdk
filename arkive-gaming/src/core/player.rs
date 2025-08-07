@@ -21,14 +21,9 @@ pub struct SerializablePlayer {
 }
 
 impl Player {
-    pub fn new(
-        id: String,
-        wallet_id: String,
-        ark_address: ArkAddress,
-        keypair: &Keypair,
-    ) -> Self {
+    pub fn new(id: String, wallet_id: String, ark_address: ArkAddress, keypair: &Keypair) -> Self {
         let public_key = hex::encode(keypair.public_key().serialize());
-        
+
         Self {
             id,
             wallet_id,

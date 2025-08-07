@@ -1,5 +1,3 @@
-pub mod compiler;
-pub mod manager;
+pub mod tapscript_manager;
 
-pub use compiler::{ArkadeCompiler, CompiledContract};
-pub use manager::{ContractManager, LotteryContract};
+pub use tapscript_manager::{CompiledScript, LotteryTapscripts, TapscriptManager};

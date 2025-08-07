@@ -1,0 +1,18 @@
+eltr(
+    asp_pubkey,
+    {
+        and_v(
+            and_v(
+                pk(winner_pubkey),
+                pk(asp_pubkey)
+            ),
+            and_v(
+                hash256_eq(commitment1_reveal, commitment1_hash),
+                and_v(
+                    hash256_eq(commitment2_reveal, commitment2_hash),
+                    value_eq(out_value(0), total_amount)
+                )
+            )
+        )
+    }
+)

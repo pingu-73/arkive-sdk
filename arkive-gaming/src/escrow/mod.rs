@@ -1,3 +1,3 @@
-pub mod manager;
+pub mod vtxo_manager;
 
-pub use manager::{EscrowManager, LotteryEscrow, PayoutRevealData, SerializableLotteryEscrow};
+pub use vtxo_manager::{LotteryVtxo, VtxoEscrowManager};

@@ -72,7 +72,7 @@ pub struct TwoPlayerLotteryState {
     pub pot_amount: Amount,
     pub players: Vec<Player>,
     pub commitments: std::collections::HashMap<String, Commitment>, // player_id -> commitment
-    pub reveals: std::collections::HashMap<String, Reveal>, // player_id -> reveal
+    pub reveals: std::collections::HashMap<String, Reveal>,         // player_id -> reveal
     pub timeouts: GamePhaseTimeouts,
     pub result: Option<GameResult>, // Keep original GameResult
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -105,7 +105,7 @@ impl GameResult {
 impl TwoPlayerLotteryState {
     pub fn new(game_id: String, bet_amount: Amount) -> Self {
         let now = chrono::Utc::now();
-        
+
         Self {
             game_id,
             state: GameState::WaitingForPlayers,
@@ -143,8 +143,11 @@ impl TwoPlayerLotteryState {
         }
     }
 
-    pub fn from_serializable(serializable: SerializableTwoPlayerLotteryState) -> Result<Self, String> {
-        let players: Result<Vec<Player>, String> = serializable.players
+    pub fn from_serializable(
+        serializable: SerializableTwoPlayerLotteryState,
+    ) -> Result<Self, String> {
+        let players: Result<Vec<Player>, String> = serializable
+            .players
             .into_iter()
             .map(Player::from_serializable)
             .collect();

@@ -1,0 +1,44 @@
+eltr(
+    asp_pubkey,
+    {
+        // Winner payout path
+        and_v(
+            and_v(
+                pk(player1_pubkey),
+                pk(asp_pubkey)
+            ),
+            value_eq(out_value(0), total_amount)
+        ),
+        // Timeout refund path
+        and_v(
+            older(timeout_delay),
+            and_v(
+                and_v(
+                    pk(player1_pubkey),
+                    pk(player2_pubkey)
+                ),
+                and_v(
+                    pk(asp_pubkey),
+                    and_v(
+                        value_eq(out_value(0), bet_amount),
+                        value_eq(out_value(1), bet_amount)
+                    )
+                )
+            )
+        ),
+        // Mutual abort path
+        and_v(
+            and_v(
+                pk(player1_pubkey),
+                pk(player2_pubkey)
+            ),
+            and_v(
+                pk(asp_pubkey),
+                and_v(
+                    value_eq(out_value(0), bet_amount),
+                    value_eq(out_value(1), bet_amount)
+                )
+            )
+        )
+    }
+)

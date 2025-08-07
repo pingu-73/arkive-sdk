@@ -1,3 +1,3 @@
 pub mod scheme;
 
-pub use scheme::{Commitment, CommitmentData, CommitmentScheme, Reveal};
+pub use scheme::{Commitment, CommitmentData, CommitmentScheme, CommitmentType, Reveal};

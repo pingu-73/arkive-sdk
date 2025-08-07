@@ -1,6 +1,7 @@
 /target
 games.json
 escrows.json
+vtxos_test_game.json
 
 # JetBrains products
 .idea

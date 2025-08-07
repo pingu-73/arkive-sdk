@@ -1,30 +1,3 @@
-# MINISCRIPT_COMPILER = miniscript-compiler
-
-# .PHONY: all escrow winner timeout abort clean validate
-
-# all: escrow winner timeout abort
-
-# escrow:
-# 	$(MINISCRIPT_COMPILER) descriptor "$(shell cat ./miniscript/lottery_escrow.miniscript)"
-
-# winner:
-# 	$(MINISCRIPT_COMPILER) descriptor "$(shell cat ./miniscript/winner_payout.miniscript)"
-
-# timeout:
-# 	$(MINISCRIPT_COMPILER) descriptor "$(shell cat ./miniscript/timeout_refund.miniscript)"
-
-# abort:
-# 	$(MINISCRIPT_COMPILER) descriptor "$(shell cat ./miniscript/mutual_abort.miniscript)"
-
-# validate: all
-# 	@echo "All lottery scripts compiled successfully with Elements miniscript"
-
-# # Test the compiler installation
-# test-compiler:
-# 	@echo "Testing Elements miniscript compiler..."
-# 	$(MINISCRIPT_COMPILER) descriptor "eltr(02d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e)"
-
-# scripts/Makefile
 MINISCRIPT_COMPILER = miniscript-compiler
 
 # Test parameters

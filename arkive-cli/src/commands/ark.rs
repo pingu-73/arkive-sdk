@@ -67,7 +67,10 @@ pub async fn handle_ark_command(cmd: ArkCommands, manager: &WalletManager) -> Re
                 "spendable" => wallet.get_spendable_vtxos().await?,
                 "preconfirmed" => wallet.get_preconfirmed_vtxos().await?,
                 "recoverable" => wallet.get_recoverable_vtxos().await?,
-                "all" | _ => wallet.list_vtxos().await?,
+                _ => {
+                    println!("Warning: Unknown filter '{}', showing all VTXOs", filter);
+                    wallet.list_vtxos().await?
+                }
             };
 
             if vtxos.is_empty() {

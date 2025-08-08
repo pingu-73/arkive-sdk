@@ -2,7 +2,7 @@ use crate::ark::ArkService;
 use crate::bitcoin::BitcoinService;
 use crate::error::{ArkiveError, Result};
 use crate::storage::Storage;
-use crate::types::{Address, AddressType, Balance, Transaction, VtxoInfo};
+use crate::types::{Address, AddressType, Balance, BatchSwapInfo, Transaction, VtxoInfo};
 use crate::wallet::WalletConfig;
 
 use ark_core::ArkAddress;
@@ -139,6 +139,58 @@ impl ArkWallet {
         self.ark_service.list_vtxos().await
     }
 
+    /// Get spendable VTXOs (confirmed, preconfirmed, and recoverable)
+    pub async fn get_spendable_vtxos(&self) -> Result<Vec<VtxoInfo>> {
+        let vtxos = self.ark_service.list_vtxos().await?;
+        let spendable = vtxos
+            .into_iter()
+            .filter(|vtxo| {
+                matches!(
+                    vtxo.status,
+                    crate::types::VtxoStatus::Confirmed
+                        | crate::types::VtxoStatus::Preconfirmed
+                        | crate::types::VtxoStatus::Pending
+                ) || vtxo.is_recoverable
+            })
+            .collect();
+        Ok(spendable)
+    }
+
+    /// Get preconfirmed VTXOs that need batch swap
+    pub async fn get_preconfirmed_vtxos(&self) -> Result<Vec<VtxoInfo>> {
+        let vtxos = self.ark_service.list_vtxos().await?;
+        let preconfirmed = vtxos
+            .into_iter()
+            .filter(|vtxo| matches!(vtxo.status, crate::types::VtxoStatus::Preconfirmed))
+            .collect();
+        Ok(preconfirmed)
+    }
+
+    /// Get recoverable VTXOs
+    pub async fn get_recoverable_vtxos(&self) -> Result<Vec<VtxoInfo>> {
+        let vtxos = self.ark_service.list_vtxos().await?;
+        let recoverable = vtxos
+            .into_iter()
+            .filter(|vtxo| vtxo.is_recoverable)
+            .collect();
+        Ok(recoverable)
+    }
+
+    /// Initiate batch swap
+    pub async fn batch_swap(&self, vtxos_to_swap: Option<Vec<String>>) -> Result<Option<String>> {
+        self.ark_service.batch_swap(vtxos_to_swap).await
+    }
+
+    /// Get batch swap information
+    pub async fn get_batch_swap_info(&self, swap_id: &str) -> Result<Option<BatchSwapInfo>> {
+        self.ark_service.get_batch_swap_info(swap_id).await
+    }
+
+    /// List all batch swaps
+    pub async fn list_batch_swaps(&self) -> Result<Vec<BatchSwapInfo>> {
+        self.ark_service.list_batch_swaps().await
+    }
+
     pub async fn participate_in_round(&self) -> Result<Option<String>> {
         self.ark_service.participate_in_round().await
     }
@@ -171,6 +223,15 @@ impl ArkWallet {
         let cleaned = self.cleanup_expired_data().await?;
         if cleaned > 0 {
             tracing::info!("Cleaned up {} expired VTXOs", cleaned);
+        }
+
+        // Check for preconfirmed VTXOs that need batch swap
+        let preconfirmed = self.get_preconfirmed_vtxos().await?;
+        if !preconfirmed.is_empty() {
+            tracing::info!(
+                "Found {} preconfirmed VTXOs that may need batch swap",
+                preconfirmed.len()
+            );
         }
 
         Ok(())
@@ -232,10 +293,11 @@ impl ArkWallet {
         &self,
         hours_threshold: i64,
     ) -> Result<Vec<crate::storage::vtxo_store::VtxoState>> {
-        let vtxo_store = crate::storage::VtxoStore::new(&self.storage);
-        vtxo_store
-            .get_expiring_vtxos(&self.id, hours_threshold)
-            .await
+        // let vtxo_store = crate::storage::VtxoStore::new(&self.storage);
+        // vtxo_store
+        //     .get_expiring_vtxos(&self.id, hours_threshold)
+        //     .await
+        self.ark_service.get_expiring_vtxos(hours_threshold).await
     }
 
     /// Clean up expired VTXOs and old data
@@ -243,4 +305,94 @@ impl ArkWallet {
         let vtxo_store = crate::storage::VtxoStore::new(&self.storage);
         vtxo_store.cleanup_expired(&self.id).await
     }
+
+    pub async fn auto_manage_vtxos(&self, hours_threshold: i64) -> Result<Option<String>> {
+        let expiring_vtxos = self.get_expiring_vtxos(hours_threshold).await?;
+
+        if expiring_vtxos.is_empty() {
+            return Ok(None);
+        }
+
+        tracing::info!(
+            "Found {} VTXOs expiring within {} hours, initiating batch swap",
+            expiring_vtxos.len(),
+            hours_threshold
+        );
+
+        let vtxo_outpoints: Vec<String> =
+            expiring_vtxos.iter().map(|v| v.outpoint.clone()).collect();
+
+        self.batch_swap(Some(vtxo_outpoints)).await
+    }
+
+    /// New v0.7 method: Get detailed VTXO statistics
+    pub async fn get_vtxo_statistics(&self) -> Result<VtxoStatistics> {
+        let vtxos = self.list_vtxos().await?;
+
+        let mut stats = VtxoStatistics::default();
+
+        for vtxo in vtxos {
+            stats.total_count += 1;
+            stats.total_value += vtxo.amount;
+
+            match vtxo.status {
+                crate::types::VtxoStatus::Confirmed => {
+                    stats.confirmed_count += 1;
+                    stats.confirmed_value += vtxo.amount;
+                }
+                crate::types::VtxoStatus::Preconfirmed => {
+                    stats.preconfirmed_count += 1;
+                    stats.preconfirmed_value += vtxo.amount;
+                }
+                crate::types::VtxoStatus::Pending => {
+                    stats.pending_count += 1;
+                    stats.pending_value += vtxo.amount;
+                }
+                crate::types::VtxoStatus::Spent => {
+                    stats.spent_count += 1;
+                    stats.spent_value += vtxo.amount;
+                }
+                crate::types::VtxoStatus::Expired => {
+                    stats.expired_count += 1;
+                    stats.expired_value += vtxo.amount;
+                }
+                _ => {}
+            }
+
+            if vtxo.is_recoverable {
+                stats.recoverable_count += 1;
+                stats.recoverable_value += vtxo.amount;
+            }
+
+            // Check if expiring soon (within 24 hours)
+            let now = chrono::Utc::now();
+            let threshold = now + chrono::Duration::hours(24);
+            if vtxo.expiry <= threshold {
+                stats.expiring_soon_count += 1;
+                stats.expiring_soon_value += vtxo.amount;
+            }
+        }
+
+        Ok(stats)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VtxoStatistics {
+    pub total_count: usize,
+    pub total_value: Amount,
+    pub confirmed_count: usize,
+    pub confirmed_value: Amount,
+    pub preconfirmed_count: usize,
+    pub preconfirmed_value: Amount,
+    pub pending_count: usize,
+    pub pending_value: Amount,
+    pub spent_count: usize,
+    pub spent_value: Amount,
+    pub expired_count: usize,
+    pub expired_value: Amount,
+    pub recoverable_count: usize,
+    pub recoverable_value: Amount,
+    pub expiring_soon_count: usize,
+    pub expiring_soon_value: Amount,
 }

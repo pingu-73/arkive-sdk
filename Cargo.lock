@@ -121,8 +121,8 @@ checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 
 [[package]]
 name = "ark-bdk-wallet"
-version = "0.5.9"
-source = "git+https://github.com/pingu-73/ark-rs?rev=865bd5c414545efd6cbbd8889fefafde4ecf592c#865bd5c414545efd6cbbd8889fefafde4ecf592c"
+version = "0.7.0"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=37172878dca6c3d8cabb0d7a73bc36103ae733af#37172878dca6c3d8cabb0d7a73bc36103ae733af"
 dependencies = [
  "anyhow",
  "ark-client",
@@ -140,8 +140,8 @@ dependencies = [
 
 [[package]]
 name = "ark-client"
-version = "0.5.9"
-source = "git+https://github.com/pingu-73/ark-rs?rev=865bd5c414545efd6cbbd8889fefafde4ecf592c#865bd5c414545efd6cbbd8889fefafde4ecf592c"
+version = "0.7.0"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=37172878dca6c3d8cabb0d7a73bc36103ae733af#37172878dca6c3d8cabb0d7a73bc36103ae733af"
 dependencies = [
  "ark-core",
  "ark-grpc",
@@ -168,8 +168,8 @@ dependencies = [
 
 [[package]]
 name = "ark-core"
-version = "0.5.9"
-source = "git+https://github.com/pingu-73/ark-rs?rev=865bd5c414545efd6cbbd8889fefafde4ecf592c#865bd5c414545efd6cbbd8889fefafde4ecf592c"
+version = "0.7.0"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=37172878dca6c3d8cabb0d7a73bc36103ae733af#37172878dca6c3d8cabb0d7a73bc36103ae733af"
 dependencies = [
  "ark-secp256k1",
  "bech32",
@@ -177,13 +177,15 @@ dependencies = [
  "getrandom 0.2.16",
  "getrandom 0.3.3",
  "rand 0.8.5",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 
 [[package]]
 name = "ark-grpc"
-version = "0.5.9"
-source = "git+https://github.com/pingu-73/ark-rs?rev=865bd5c414545efd6cbbd8889fefafde4ecf592c#865bd5c414545efd6cbbd8889fefafde4ecf592c"
+version = "0.7.0"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=37172878dca6c3d8cabb0d7a73bc36103ae733af#37172878dca6c3d8cabb0d7a73bc36103ae733af"
 dependencies = [
  "ark-core",
  "ark-secp256k1",
@@ -194,6 +196,7 @@ dependencies = [
  "log",
  "prost",
  "prost-types",
+ "serde_json",
  "tonic",
  "tonic-build",
 ]
@@ -201,7 +204,7 @@ dependencies = [
 [[package]]
 name = "ark-secp256k1"
 version = "0.31.0"
-source = "git+https://github.com/pingu-73/ark-rs?rev=865bd5c414545efd6cbbd8889fefafde4ecf592c#865bd5c414545efd6cbbd8889fefafde4ecf592c"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=37172878dca6c3d8cabb0d7a73bc36103ae733af#37172878dca6c3d8cabb0d7a73bc36103ae733af"
 dependencies = [
  "bitcoin_hashes 0.14.0",
  "rand 0.9.1",
@@ -2512,7 +2515,7 @@ dependencies = [
 [[package]]
 name = "secp256k1-sys"
 version = "0.11.0"
-source = "git+https://github.com/pingu-73/ark-rs?rev=865bd5c414545efd6cbbd8889fefafde4ecf592c#865bd5c414545efd6cbbd8889fefafde4ecf592c"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=37172878dca6c3d8cabb0d7a73bc36103ae733af#37172878dca6c3d8cabb0d7a73bc36103ae733af"
 dependencies = [
  "cc",
 ]
@@ -2919,6 +2922,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -3309,6 +3313,24 @@ checksum = "33b6dd2ef9186f1f2072e409e99cd22a975331a6b3591b12c764e0e55c60d5d2"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.2",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e8983c3ab33d6fb807cfcdad2491c4ea8cbc8ed839181c7dfd9c67c83e261b2"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

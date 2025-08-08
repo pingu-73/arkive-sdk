@@ -78,6 +78,7 @@ impl Storage {
                 source TEXT NOT NULL DEFAULT 'Blockchain',
                 last_updated INTEGER NOT NULL,
                 ark_round_id TEXT,
+                batch_swap_id TEXT,
                 fee INTEGER,
                 raw_data TEXT,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
@@ -109,6 +110,8 @@ impl Storage {
                 presigned_transactions TEXT NOT NULL,
                 expiry INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
+                server_pubkey TEXT,
+                aggregate_pubkey TEXT,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
                 PRIMARY KEY (wallet_id, batch_id)
             )",
@@ -129,6 +132,12 @@ impl Storage {
                 exit_transactions TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_updated INTEGER DEFAULT 0,
+                is_preconfirmed BOOLEAN DEFAULT FALSE,
+                is_recoverable BOOLEAN DEFAULT FALSE,
+                commitment_txids TEXT DEFAULT '[]',
+                spent_by TEXT,
+                settled_by TEXT,
+                ark_txid TEXT,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
                 PRIMARY KEY (wallet_id, outpoint)
             )",
@@ -152,6 +161,60 @@ impl Storage {
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (wallet_id) REFERENCES wallets(id),
                 PRIMARY KEY (wallet_id, outpoint)
+            )",
+            [],
+        )?;
+
+        // Batch swaps table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS batch_swaps (
+                wallet_id TEXT NOT NULL,
+                swap_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_vtxos TEXT NOT NULL,
+                output_vtxos TEXT,
+                commitment_txid TEXT,
+                forfeit_txs TEXT,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                signed_at INTEGER,
+                committed_at INTEGER,
+                last_updated INTEGER DEFAULT 0,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id),
+                PRIMARY KEY (wallet_id, swap_id)
+            )",
+            [],
+        )?;
+
+        // Connector outputs table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS connector_outputs (
+                wallet_id TEXT NOT NULL,
+                outpoint TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                associated_vtxo TEXT NOT NULL,
+                status TEXT NOT NULL,
+                commitment_txid TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                spent_at INTEGER,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id),
+                PRIMARY KEY (wallet_id, outpoint)
+            )",
+            [],
+        )?;
+
+        // Forfeit tx table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS forfeit_transactions (
+                wallet_id TEXT NOT NULL,
+                txid TEXT NOT NULL,
+                vtxo_outpoint TEXT NOT NULL,
+                connector_outpoint TEXT NOT NULL,
+                signed_psbt TEXT NOT NULL,
+                batch_swap_id TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id),
+                PRIMARY KEY (wallet_id, txid)
             )",
             [],
         )?;

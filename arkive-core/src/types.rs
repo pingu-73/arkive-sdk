@@ -41,6 +41,9 @@ pub enum TransactionType {
     Ark,
     Boarding,
     Exit,
+    BatchSwap,
+    ConnectorSpend,
+    ForfeitTx,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +52,7 @@ pub enum TransactionStatus {
     Confirmed,
     Failed,
     Spent,
+    Replaced,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,12 +75,54 @@ pub struct VtxoInfo {
     pub status: VtxoStatus,
     pub expiry: DateTime<Utc>,
     pub address: String,
+    pub is_preconfirmed: bool,
+    pub is_recoverable: bool,
+    pub batch_id: Option<String>,
+    pub commitment_txids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VtxoStatus {
+    Preconfirmed,
+    Unconfirmed,
     Pending,
     Confirmed,
+    Spent,
+    Expired,
+    Replaced,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchSwapInfo {
+    pub swap_id: String,
+    pub status: BatchSwapStatus,
+    pub input_vtxos: Vec<String>,
+    pub output_vtxos: Vec<String>,
+    pub commitment_txid: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BatchSwapStatus {
+    Pending,
+    Signed,
+    Committed,
+    Confirmed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorInfo {
+    pub outpoint: String,
+    pub amount: Amount,
+    pub associated_vtxo: String,
+    pub status: ConnectorStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConnectorStatus {
+    Active,
     Spent,
     Expired,
 }

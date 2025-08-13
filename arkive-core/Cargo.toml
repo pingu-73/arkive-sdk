@@ -14,6 +14,8 @@ ark-bdk-wallet = { workspace = true }
 ark-grpc = { workspace = true }
 
 bitcoin = { workspace = true }
+musig = {workspace = true }
+bitcoin_hashes = "0.12.0"
 bip39 = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }

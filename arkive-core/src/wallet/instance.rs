@@ -1,6 +1,7 @@
 use crate::ark::ArkService;
 use crate::bitcoin::BitcoinService;
 use crate::error::{ArkiveError, Result};
+use crate::games::GameService;
 use crate::storage::Storage;
 use crate::types::{Address, AddressType, Balance, BatchSwapInfo, Transaction, VtxoInfo};
 use crate::wallet::WalletConfig;
@@ -14,10 +15,10 @@ use std::sync::Arc;
 pub struct ArkWallet {
     id: String,
     name: String,
-    keypair: Keypair,
+    pub keypair: Keypair,
     config: WalletConfig,
     bitcoin_service: BitcoinService,
-    ark_service: ArkService,
+    ark_service: Arc<ArkService>,
     storage: Arc<Storage>,
 }
 
@@ -33,7 +34,7 @@ impl ArkWallet {
             BitcoinService::new(keypair, config.clone(), storage.clone(), id.clone()).await?;
 
         let ark_service =
-            ArkService::new(keypair, config.clone(), storage.clone(), id.clone()).await?;
+            Arc::new(ArkService::new(keypair, config.clone(), storage.clone(), id.clone()).await?);
 
         Ok(Self {
             id,
@@ -44,6 +45,10 @@ impl ArkWallet {
             ark_service,
             storage,
         })
+    }
+
+    pub async fn get_ark_service(&self) -> Result<Arc<ArkService>> {
+        Ok(self.ark_service.clone())
     }
 
     // Wallet metadata
@@ -374,6 +379,32 @@ impl ArkWallet {
         }
 
         Ok(stats)
+    }
+
+    /// Get game service for trustless games
+    pub fn get_game_service(&self) -> GameService {
+        GameService::new(self.storage.clone(), self.keypair, self.config.network, self.config.is_mutinynet)
+    }
+
+    /// Create a trustless lottery
+    pub async fn create_lottery(&self, players: usize, entry_fee: Amount) -> Result<String> {
+        let game_service = self.get_game_service();
+        let lottery_id = game_service.create_lottery(players, entry_fee).await?;
+        Ok(lottery_id)
+    }
+
+    /// Join a lottery
+    pub async fn join_lottery(&self, escrow_address: &str, entry_fee: Amount) -> Result<String> {
+        // Send entry fee to escrow
+        let txid = self.send_onchain(escrow_address, entry_fee).await?;
+
+        // Register participation
+        let game_service = self.get_game_service();
+        game_service
+            .register_participation(escrow_address, &txid)
+            .await?;
+
+        Ok(txid)
     }
 }
 

@@ -1,6 +1,8 @@
 #![allow(unused_imports)]
 use arkive_core::games::service::GameService;
-use arkive_core::games::{Commitment, EscrowState, GameEscrow, GameOutcome, Participant, Reveal, LotteryState};
+use arkive_core::games::{
+    Commitment, EscrowState, GameEscrow, GameOutcome, LotteryState, Participant, Reveal,
+};
 use arkive_core::{ArkAddress, ArkiveError, Result, WalletManager};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
@@ -279,32 +281,34 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
         LotteryCommands::Reveal { wallet, lottery_id } => {
             let wallet_instance = manager.load_wallet(&wallet).await?;
             let (participant_pubkey, _) = wallet_instance.keypair.x_only_public_key();
-        
+
             println!("Revealing secret for escrow lottery {}...", lottery_id);
-        
+
             // Load secret
             // let (secret, nonce) = load_lottery_secret(&lottery_id)?;
             let (secret, nonce) = load_lottery_secret(&lottery_id, &participant_pubkey)?;
-        
+
             // Create reveal with proper signatures
             let reveal = create_reveal(&secret, &nonce, &wallet_instance.keypair)?;
-            
+
             let game_service = wallet_instance.get_game_service();
-        
+
             // Submit reveal to lottery coordinator
             let outcome_option = game_service
                 .submit_escrow_reveal(&lottery_id, participant_pubkey, reveal)
                 .await?;
-        
+
             println!("✅ Secret revealed for lottery {}", lottery_id);
-            println!("Preimage: {}", hex::encode(&secret));
-            println!("Nonce: {}", hex::encode(&nonce));
-        
+            println!("Preimage: {}", hex::encode(secret));
+            println!("Nonce: {}", hex::encode(nonce));
+
             // Check if all revealed and determine winner
             if let Some(outcome) = outcome_option {
                 if outcome.winner == participant_pubkey {
                     println!("\n🎉 CONGRATULATIONS! You won the lottery!");
-                    let winner_payout = outcome.payouts.get(&outcome.winner)
+                    let winner_payout = outcome
+                        .payouts
+                        .get(&outcome.winner)
                         .map(|amt| amt.to_sat())
                         .unwrap_or(0);
                     println!("💰 Prize: {} sats", winner_payout);
@@ -314,13 +318,15 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                     println!("Winner: {}", outcome.winner);
                     println!("Better luck next time!");
                 }
-                
+
                 // Trigger payout processing
                 println!("\n📦 Processing lottery payout...");
                 let ark_service = wallet_instance.get_ark_service().await?;
-                match game_service.lottery_coordinator()
+                match game_service
+                    .lottery_coordinator()
                     .execute_winner_payout(&lottery_id, outcome.winner, &ark_service)
-                    .await {
+                    .await
+                {
                     Ok(swap_id) => {
                         println!("✅ Payout initiated via batch swap: {}", swap_id);
                         println!("Run 'arkive ark sync {}' to claim your winnings", wallet);
@@ -334,7 +340,7 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                 println!("Reveal submitted. Waiting for other participants...");
                 println!("Run this command again if you think all reveals are complete.");
             }
-        
+
             Ok(())
         }
 
@@ -400,10 +406,10 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
             if wallets.is_empty() {
                 return Err(ArkiveError::internal("No wallets available"));
             }
-        
+
             let wallet = manager.load_wallet(&wallets[0]).await?;
             let game_service = wallet.get_game_service();
-        
+
             match game_service.load_lottery_escrow(&lottery_id).await {
                 Ok(lottery_escrow) => {
                     println!("Escrow Lottery Status: {}", lottery_id);
@@ -413,15 +419,15 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                     println!("Entry Fee: {} sats", lottery_escrow.entry_fee.to_sat());
                     println!("Total Pot: {} sats", lottery_escrow.total_pot.to_sat());
                     println!("Participants: {}", lottery_escrow.participants.len());
-        
+
                     for (i, participant) in lottery_escrow.participants.iter().enumerate() {
                         println!("  {}. {}", i + 1, participant);
                     }
-        
+
                     println!("Created: {}", lottery_escrow.created_at);
                     println!("Reveal Deadline: {}", lottery_escrow.reveal_deadline);
                     println!("Claim Deadline: {}", lottery_escrow.claim_deadline);
-        
+
                     // Show funding status
                     if !lottery_escrow.funding_vtxos.is_empty() {
                         println!("\nFunding Status:");
@@ -434,7 +440,7 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                             );
                         }
                     }
-        
+
                     // Show commitment/reveal status
                     let committed = lottery_escrow.commitments.len();
                     let revealed = lottery_escrow.reveals.len();
@@ -451,14 +457,16 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                             lottery_escrow.participants.len()
                         );
                     }
-        
+
                     // Show next action based on state
                     match lottery_escrow.state {
                         LotteryState::AwaitingFunding => {
                             println!("\n📋 Next: Wait for all participants to fund escrow");
                         }
                         LotteryState::CommitmentPhase => {
-                            println!("\n📋 Next: All participants should commit their random values");
+                            println!(
+                                "\n📋 Next: All participants should commit their random values"
+                            );
                         }
                         LotteryState::RevealPhase => {
                             println!("\n📋 Next: All participants should reveal their secrets");
@@ -481,7 +489,7 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                     println!("❌ Failed to load lottery: {}", e);
                 }
             }
-        
+
             Ok(())
         }
 
@@ -558,9 +566,11 @@ pub fn load_lottery_secret(
         .as_object()
         .ok_or_else(|| ArkiveError::internal("No secrets found for participant"))?;
 
-    let secret_hex = participant_secrets["secret"].as_str()
+    let secret_hex = participant_secrets["secret"]
+        .as_str()
         .ok_or_else(|| ArkiveError::internal("Missing secret for participant"))?;
-    let nonce_hex = participant_secrets["nonce"].as_str()
+    let nonce_hex = participant_secrets["nonce"]
+        .as_str()
         .ok_or_else(|| ArkiveError::internal("Missing nonce for participant"))?;
 
     let secret = hex::decode(secret_hex)
@@ -569,9 +579,11 @@ pub fn load_lottery_secret(
         .map_err(|e| ArkiveError::internal(format!("Invalid nonce hex: {}", e)))?;
 
     Ok((
-        secret.try_into()
+        secret
+            .try_into()
             .map_err(|_| ArkiveError::internal("Invalid secret length"))?,
-        nonce.try_into()
+        nonce
+            .try_into()
             .map_err(|_| ArkiveError::internal("Invalid nonce length"))?,
     ))
 }

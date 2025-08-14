@@ -130,13 +130,13 @@ impl TestEnvironment {
     async fn fund_ark_server(&self) -> Result<()> {
         let forfeit_addr = self.get_forfeit_addr().await?;
         let admin_wallet_addr = self.get_admin_wallet_addr().await?;
-        
+
         info!(" Funding Ark server forfeit address: {}", forfeit_addr);
         self.nigiri_faucet(&forfeit_addr, 10.0).await?;
-        
+
         info!(" Funding admin wallet: {}", admin_wallet_addr);
         self.nigiri_faucet(&admin_wallet_addr, 10.0).await?;
-        
+
         info!(" Mining block to confirm the funding");
         self.mine_blocks(4).await?;
 

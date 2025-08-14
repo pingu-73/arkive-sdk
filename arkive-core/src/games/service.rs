@@ -34,7 +34,7 @@ impl GameService {
             (Network::Regtest, false) => {
                 // For local regtest
                 XOnlyPublicKey::from_str(
-                    "4a60b49b9d02438274c7c6134e014867f10f56bea4044253567e3226d5e462ed",
+                    "8bf56160efc769112b361de4117b3c71b88ca16f1bb9f6ac7a2781929abc5e6a",
                 )
                 .expect("valid regtest server key")
             }

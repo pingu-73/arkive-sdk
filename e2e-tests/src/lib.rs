@@ -12,7 +12,7 @@ pub const ARK_SERVER_URL: &str = "http://localhost:7070";
 pub const NIGIRI_RPC_URL: &str = "http://localhost:18443";
 pub const NIGIRI_USER: &str = "admin1";
 pub const NIGIRI_PASS: &str = "123";
-pub const ARK_TRANSACTION_FEE: u64 = 198;
+pub const ARK_TRANSACTION_FEE: u64 = 0;
 
 pub struct TestEnvironment {
     pub temp_dir: TempDir,
@@ -51,8 +51,8 @@ impl TestEnvironment {
 
         self.check_services().await?;
 
-        info!("  Mining initial 405 blocks...");
-        self.mine_blocks(405).await?;
+        info!("  Mining initial 506 blocks...");
+        self.mine_blocks(506).await?;
 
         self.fund_ark_server().await?;
 
@@ -132,10 +132,10 @@ impl TestEnvironment {
         let admin_wallet_addr = self.get_admin_wallet_addr().await?;
 
         info!(" Funding Ark server forfeit address: {}", forfeit_addr);
-        self.nigiri_faucet(&forfeit_addr, 10.0).await?;
+        self.nigiri_faucet(&forfeit_addr, 100.0).await?;
 
         info!(" Funding admin wallet: {}", admin_wallet_addr);
-        self.nigiri_faucet(&admin_wallet_addr, 10.0).await?;
+        self.nigiri_faucet(&admin_wallet_addr, 100.0).await?;
 
         info!(" Mining block to confirm the funding");
         self.mine_blocks(4).await?;
@@ -292,7 +292,7 @@ impl TestWallet {
         self.sync().await?;
 
         info!("⏳ Waiting 5 seconds after sync...");
-        sleep(Duration::from_secs(5)).await;
+        sleep(Duration::from_secs(70)).await;
 
         // Try to participate in round with retries
         for attempt in 1..=3 {
@@ -320,7 +320,7 @@ impl TestWallet {
                         // Try syncing again
                         info!(" Syncing again...");
                         self.sync().await?;
-                        sleep(Duration::from_secs(2)).await;
+                        sleep(Duration::from_secs(60)).await;
                         continue;
                     }
                 }
@@ -396,7 +396,7 @@ impl TestWallet {
         self.sync().await?;
 
         // Wait a bit after sync
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(60)).await;
 
         self.wait_for_balance(0, expected_pending, timeout_secs)
             .await

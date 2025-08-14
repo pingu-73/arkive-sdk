@@ -298,10 +298,6 @@ impl ArkWallet {
         &self,
         hours_threshold: i64,
     ) -> Result<Vec<crate::storage::vtxo_store::VtxoState>> {
-        // let vtxo_store = crate::storage::VtxoStore::new(&self.storage);
-        // vtxo_store
-        //     .get_expiring_vtxos(&self.id, hours_threshold)
-        //     .await
         self.ark_service.get_expiring_vtxos(hours_threshold).await
     }
 
@@ -383,28 +379,12 @@ impl ArkWallet {
 
     /// Get game service for trustless games
     pub fn get_game_service(&self) -> GameService {
-        GameService::new(self.storage.clone(), self.keypair, self.config.network, self.config.is_mutinynet)
-    }
-
-    /// Create a trustless lottery
-    pub async fn create_lottery(&self, players: usize, entry_fee: Amount) -> Result<String> {
-        let game_service = self.get_game_service();
-        let lottery_id = game_service.create_lottery(players, entry_fee).await?;
-        Ok(lottery_id)
-    }
-
-    /// Join a lottery
-    pub async fn join_lottery(&self, escrow_address: &str, entry_fee: Amount) -> Result<String> {
-        // Send entry fee to escrow
-        let txid = self.send_onchain(escrow_address, entry_fee).await?;
-
-        // Register participation
-        let game_service = self.get_game_service();
-        game_service
-            .register_participation(escrow_address, &txid)
-            .await?;
-
-        Ok(txid)
+        GameService::new(
+            self.storage.clone(),
+            self.keypair,
+            self.config.network,
+            self.config.is_mutinynet,
+        )
     }
 }
 

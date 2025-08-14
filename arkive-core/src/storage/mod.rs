@@ -249,87 +249,6 @@ impl Storage {
         )?;
 
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS game_escrows (
-                escrow_id TEXT PRIMARY KEY,
-                game_type TEXT NOT NULL,
-                taproot_address TEXT NOT NULL,
-                total_stake INTEGER NOT NULL,
-                participants TEXT NOT NULL,
-                timeout_block INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                resolved_at INTEGER,
-                outcome TEXT,
-                payout_tx TEXT
-            )",
-            [],
-        )?;
-
-        // Game commitments table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS game_commitments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                escrow_id TEXT NOT NULL,
-                participant_pubkey TEXT NOT NULL,
-                commitment_hash TEXT NOT NULL,
-                commitment_signature TEXT NOT NULL,
-                reveal_preimage TEXT,
-                reveal_nonce TEXT,
-                reveal_signature TEXT,
-                timestamp INTEGER NOT NULL,
-                FOREIGN KEY (escrow_id) REFERENCES game_escrows(escrow_id),
-                UNIQUE(escrow_id, participant_pubkey)
-            )",
-            [],
-        )?;
-
-        // Game participations table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS game_participations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                escrow_address TEXT NOT NULL,
-                txid TEXT NOT NULL,
-                participant_key TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            )",
-            [],
-        )?;
-
-        // Game outcomes table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS game_outcomes (
-                escrow_id TEXT PRIMARY KEY,
-                winner_pubkey TEXT NOT NULL,
-                runner_ups TEXT,
-                payouts TEXT NOT NULL,
-                proof TEXT NOT NULL,
-                payout_psbt TEXT,
-                signatures TEXT,
-                finalized_at INTEGER,
-                FOREIGN KEY (escrow_id) REFERENCES game_escrows(escrow_id)
-            )",
-            [],
-        )?;
-
-        // Game disputes table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS game_disputes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                escrow_id TEXT NOT NULL,
-                disputing_party TEXT NOT NULL,
-                dispute_reason TEXT NOT NULL,
-                evidence TEXT,
-                resolution TEXT,
-                resolved_at INTEGER,
-                FOREIGN KEY (escrow_id) REFERENCES game_escrows(escrow_id)
-            )",
-            [],
-        )?;
-
-
-        // -----------remove----------
-        // Add this table to init_schema method:
-        conn.execute(
             "CREATE TABLE IF NOT EXISTS lottery_escrows (
                 lottery_id TEXT PRIMARY KEY,
                 escrow_data TEXT NOT NULL,
@@ -365,7 +284,6 @@ impl Storage {
             [],
         )?;
 
-        // Add index for efficient queries
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_lottery_escrows_state 
             ON lottery_escrows(state)",

@@ -1,19 +1,18 @@
 #![allow(unused_imports)]
-use super::escrow_scripts::{LotteryEscrowScript, LotteryEscrowOptions};
-use super::fairness::{FairnessEngine, ModuloVerifier};
+use super::escrow_scripts::{LotteryEscrowOptions, LotteryEscrowScript};
 use super::{Commitment, GameOutcome, Participant, Reveal};
 use crate::ark::ArkService;
 use crate::error::{ArkiveError, Result};
+use crate::games::XOnlyPublicKey;
 use crate::storage::Storage;
 use crate::types::VtxoInfo;
 use ark_core::Vtxo;
-use crate::games::XOnlyPublicKey;
 use bitcoin::{Amount, Network, OutPoint, Psbt, Sequence};
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[allow(dead_code)]
 pub struct LotteryCoordinator {
@@ -22,35 +21,36 @@ pub struct LotteryCoordinator {
     is_mutinynet: bool,
     server_key: XOnlyPublicKey,
     coordinator_key: XOnlyPublicKey,
-    fairness_engine: Arc<FairnessEngine>,
 }
 
 impl LotteryCoordinator {
     pub async fn list_lotteries(&self) -> Result<Vec<LotteryEscrow>> {
         let conn = self.storage.get_connection().await;
-        
-        let mut stmt = conn.prepare(
-            "SELECT escrow_data FROM lottery_escrows ORDER BY created_at DESC"
-        )?;
-        
+
+        let mut stmt =
+            conn.prepare("SELECT escrow_data FROM lottery_escrows ORDER BY created_at DESC")?;
+
         let lotteries = stmt
             .query_map([], |row| {
                 let escrow_data: String = row.get(0)?;
-                let lottery: LotteryEscrow = serde_json::from_str(&escrow_data)
-                    .map_err(|_e| rusqlite::Error::InvalidColumnType(
-                        0, 
-                        "escrow_data".to_string(), 
-                        rusqlite::types::Type::Text
-                    ))?;
-                
+                let lottery: LotteryEscrow = serde_json::from_str(&escrow_data).map_err(|_e| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "escrow_data".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+
                 Ok(lottery)
             })?
             .collect::<std::result::Result<Vec<LotteryEscrow>, _>>()
-            .map_err(|e| ArkiveError::internal(format!("Failed to deserialize lotteries: {}", e)))?;
-            
+            .map_err(|e| {
+                ArkiveError::internal(format!("Failed to deserialize lotteries: {}", e))
+            })?;
+
         Ok(lotteries)
     }
-    
+
     pub fn new(
         storage: Arc<Storage>,
         network: Network,
@@ -58,16 +58,12 @@ impl LotteryCoordinator {
         server_key: XOnlyPublicKey,
         coordinator_key: XOnlyPublicKey,
     ) -> Self {
-        let verifier = Box::new(ModuloVerifier::new(Amount::ZERO));
-        let fairness_engine = Arc::new(FairnessEngine::new(verifier));
-
         Self {
             storage,
             network,
             is_mutinynet,
             server_key,
             coordinator_key,
-            fairness_engine,
         }
     }
 
@@ -85,11 +81,12 @@ impl LotteryCoordinator {
             reveal_timeout: Sequence::from_consensus(144), // ~1 day
             claim_timeout: Sequence::from_consensus(288),  // ~2 days
         };
-    
+
         // Create escrow script
         let secp = bitcoin::secp256k1::Secp256k1::new();
-        let escrow_script = LotteryEscrowScript::new(&secp, options.clone(), self.network, self.server_key)?;
-    
+        let escrow_script =
+            LotteryEscrowScript::new(&secp, options.clone(), self.network, self.server_key)?;
+
         // Get escrow address
         let ark_address = escrow_script.get_ark_address();
         let escrow_address_string = ark_address.to_string();
@@ -101,12 +98,12 @@ impl LotteryCoordinator {
             reveal_timeout: options.reveal_timeout.to_consensus_u32(),
             claim_timeout: options.claim_timeout.to_consensus_u32(),
         };
-    
+
         // Create lottery escrow
         let lottery_id = format!("lottery_{}", Utc::now().timestamp());
         let lottery_escrow = LotteryEscrow {
             lottery_id: lottery_id.clone(),
-            escrow_script: Some(escrow_script),  // Store as Some
+            escrow_script: Some(escrow_script), // Store as Some
             escrow_address: escrow_address_string.to_string(),
             participants: participants.clone(),
             script_parameters,
@@ -120,10 +117,10 @@ impl LotteryCoordinator {
             reveal_deadline: Utc::now() + chrono::Duration::hours(24),
             claim_deadline: Utc::now() + chrono::Duration::hours(48),
         };
-    
+
         // Store in database
         self.store_lottery_escrow(&lottery_escrow).await?;
-    
+
         Ok(lottery_escrow)
     }
 
@@ -197,43 +194,7 @@ impl LotteryCoordinator {
         participant: XOnlyPublicKey,
         reveal: Reveal,
     ) -> Result<Option<GameOutcome>> {
-        let mut lottery = self.load_lottery_escrow(lottery_id).await?;
-
-        // Verify state
-        if lottery.state != LotteryState::RevealPhase {
-            return Err(ArkiveError::internal("Not in reveal phase"));
-        }
-
-        // Verify reveal against commitment
-        let commitment = lottery.commitments.get(&participant)
-            .ok_or_else(|| ArkiveError::internal("No commitment found"))?;
-
-        let valid = self.fairness_engine.verify_reveal(
-            commitment,
-            &reveal,
-            &participant,
-        )?;
-
-        if !valid {
-            return Err(ArkiveError::internal("Invalid reveal"));
-        }
-
-        // Store reveal
-        lottery.reveals.insert(participant, reveal);
-
-        // Check if all revealed
-        if lottery.reveals.len() == lottery.participants.len() {
-            // Calculate winner
-            let outcome = self.determine_winner(&lottery).await?;
-            lottery.state = LotteryState::WinnerDetermined;
-            
-            self.update_lottery_escrow(&lottery).await?;
-            
-            return Ok(Some(outcome));
-        }
-
-        self.update_lottery_escrow(&lottery).await?;
-        Ok(None)
+        todo!("to be implemented")
     }
 
     /// Execute winner payout using forfeit transactions
@@ -251,7 +212,7 @@ impl LotteryCoordinator {
 
         // Create forfeit transactions for losers
         let mut forfeit_txs = Vec::new();
-        
+
         for funding in &lottery.funding_vtxos {
             if funding.participant != winner {
                 // This VTXO will be forfeited to winner
@@ -261,56 +222,46 @@ impl LotteryCoordinator {
         }
 
         // TODO: Execute batch swap to consolidate winnings
-        let swap_id = ark_service.batch_swap(Some(
-            forfeit_txs.iter().map(|o| o.to_string()).collect()
-        )).await?;
+        let swap_id = ark_service
+            .batch_swap(Some(forfeit_txs.iter().map(|o| o.to_string()).collect()))
+            .await?;
 
         Ok(swap_id.unwrap_or_else(|| "pending".to_string()))
     }
 
     async fn determine_winner(&self, lottery: &LotteryEscrow) -> Result<GameOutcome> {
-        let participants: Vec<Participant> = lottery.participants.iter().map(|pk| {
-            Participant {
-                pubkey: *pk,
-                ark_address: format!("ark1{}", hex::encode(pk.serialize())),
-                stake: lottery.entry_fee,
-                commitment: lottery.commitments.get(pk).cloned(),
-                reveal: lottery.reveals.get(pk).cloned(),
-                payout_script: None,
-            }
-        }).collect();
-
-        let reveals: Vec<Reveal> = lottery.reveals.values().cloned().collect();
-
-        self.fairness_engine.calculate_outcome(&participants, &reveals)
+        todo!("to be implemented")
     }
 
     async fn store_lottery_escrow(&self, lottery: &LotteryEscrow) -> Result<()> {
         let conn = self.storage.get_connection().await;
-        
+
         let escrow_data = serde_json::to_string(lottery)
-        .map_err(|e| ArkiveError::internal(format!("Failed to serialize lottery: {}", e)))?;
-        
+            .map_err(|e| ArkiveError::internal(format!("Failed to serialize lottery: {}", e)))?;
+
         conn.execute(
             "INSERT OR REPLACE INTO lottery_escrows 
              (lottery_id, escrow_data, escrow_address, state, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-             rusqlite::params![
+            rusqlite::params![
                 lottery.lottery_id,
                 escrow_data,
                 lottery.escrow_address,
-                serde_json::to_string(&lottery.state).map_err(|e| ArkiveError::internal(format!("Failed to serialize state: {}", e)))?,
+                serde_json::to_string(&lottery.state).map_err(|e| ArkiveError::internal(
+                    format!("Failed to serialize state: {}", e)
+                ))?,
                 lottery.created_at.timestamp(),
                 Utc::now().timestamp(),
             ],
-        ).map_err(|e| ArkiveError::Storage(e))?;
+        )
+        .map_err(ArkiveError::Storage)?;
 
         Ok(())
     }
 
     pub async fn load_lottery_escrow(&self, lottery_id: &str) -> Result<LotteryEscrow> {
         let conn = self.storage.get_connection().await;
-        
+
         let escrow_data: String = conn.query_row(
             "SELECT escrow_data FROM lottery_escrows WHERE lottery_id = ?1",
             rusqlite::params![lottery_id],
@@ -347,23 +298,34 @@ pub struct LotteryEscrow {
 }
 
 impl LotteryEscrow {
-    pub fn recreate_escrow_script(&self, network: Network, is_mutinynet: bool) -> Result<super::escrow_scripts::LotteryEscrowScript> {
+    pub fn recreate_escrow_script(
+        &self,
+        network: Network,
+        is_mutinynet: bool,
+    ) -> Result<super::escrow_scripts::LotteryEscrowScript> {
         let _effective_network = if is_mutinynet && network == Network::Signet {
             Network::Signet
         } else {
             network
         };
-        
+
         let options = super::escrow_scripts::LotteryEscrowOptions {
             participants: self.participants.clone(),
             coordinator: self.script_parameters.coordinator,
             server: self.script_parameters.server,
-            reveal_timeout: bitcoin::Sequence::from_consensus(self.script_parameters.reveal_timeout),
+            reveal_timeout: bitcoin::Sequence::from_consensus(
+                self.script_parameters.reveal_timeout,
+            ),
             claim_timeout: bitcoin::Sequence::from_consensus(self.script_parameters.claim_timeout),
         };
-        
+
         let secp = bitcoin::secp256k1::Secp256k1::new();
-        super::escrow_scripts::LotteryEscrowScript::new(&secp, options, _effective_network, self.script_parameters.server)
+        super::escrow_scripts::LotteryEscrowScript::new(
+            &secp,
+            options,
+            _effective_network,
+            self.script_parameters.server,
+        )
     }
 
     pub fn get_escrow_address(&self) -> Result<crate::ArkAddress> {
@@ -375,16 +337,20 @@ impl LotteryEscrow {
                 participants: self.participants.clone(),
                 coordinator: self.script_parameters.coordinator,
                 server: self.script_parameters.server,
-                reveal_timeout: bitcoin::Sequence::from_consensus(self.script_parameters.reveal_timeout),
-                claim_timeout: bitcoin::Sequence::from_consensus(self.script_parameters.claim_timeout),
+                reveal_timeout: bitcoin::Sequence::from_consensus(
+                    self.script_parameters.reveal_timeout,
+                ),
+                claim_timeout: bitcoin::Sequence::from_consensus(
+                    self.script_parameters.claim_timeout,
+                ),
             };
-            
+
             let secp = bitcoin::secp256k1::Secp256k1::new();
             let script = super::escrow_scripts::LotteryEscrowScript::new(
-                &secp, 
-                options, 
+                &secp,
+                options,
                 Network::Regtest, // TODO: change
-                self.script_parameters.server
+                self.script_parameters.server,
             )?;
             Ok(script.get_ark_address())
         }
@@ -418,7 +384,6 @@ pub enum LotteryState {
     Disputed,
 }
 
-
 // Manual serialization
 impl serde::Serialize for LotteryEscrow {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -426,7 +391,7 @@ impl serde::Serialize for LotteryEscrow {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        
+
         let mut state = serializer.serialize_struct("LotteryEscrow", 13)?;
         state.serialize_field("lottery_id", &self.lottery_id)?;
         state.serialize_field("escrow_address", &self.escrow_address)?;
@@ -468,7 +433,7 @@ impl<'de> serde::Deserialize<'de> for LotteryEscrow {
         }
 
         let helper = Helper::deserialize(deserializer)?;
-        
+
         Ok(LotteryEscrow {
             lottery_id: helper.lottery_id,
             escrow_script: None, // Will be recreated when needed
@@ -481,8 +446,10 @@ impl<'de> serde::Deserialize<'de> for LotteryEscrow {
             reveals: helper.reveals,
             funding_vtxos: helper.funding_vtxos,
             created_at: DateTime::from_timestamp(helper.created_at, 0).unwrap_or_else(Utc::now),
-            reveal_deadline: DateTime::from_timestamp(helper.reveal_deadline, 0).unwrap_or_else(Utc::now),
-            claim_deadline: DateTime::from_timestamp(helper.claim_deadline, 0).unwrap_or_else(Utc::now),
+            reveal_deadline: DateTime::from_timestamp(helper.reveal_deadline, 0)
+                .unwrap_or_else(Utc::now),
+            claim_deadline: DateTime::from_timestamp(helper.claim_deadline, 0)
+                .unwrap_or_else(Utc::now),
             script_parameters: helper.script_parameters,
         })
     }

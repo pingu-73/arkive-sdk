@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
-use ark_core::script::{multisig_script, csv_sig_script};
-use crate::ArkAddress;
-use bitcoin::{ScriptBuf, XOnlyPublicKey, Sequence};
-use bitcoin::taproot::{TaprootBuilder, TaprootSpendInfo, LeafVersion};
-use bitcoin::key::{Secp256k1, PublicKey};
 use crate::error::{ArkiveError, Result};
+use crate::ArkAddress;
+use ark_core::script::{csv_sig_script, multisig_script};
+use bitcoin::key::{PublicKey, Secp256k1};
+use bitcoin::taproot::{LeafVersion, TaprootBuilder, TaprootSpendInfo};
+use bitcoin::{ScriptBuf, Sequence, XOnlyPublicKey};
 use std::str::FromStr;
 
 /// Lottery escrow script options
@@ -47,19 +47,21 @@ struct LotteryScripts {
 
 impl LotteryEscrowScript {
     pub fn new(
-        secp: &Secp256k1<bitcoin::secp256k1::All>, 
+        secp: &Secp256k1<bitcoin::secp256k1::All>,
         options: LotteryEscrowOptions,
         network: bitcoin::Network,
         server_key: XOnlyPublicKey,
     ) -> Result<Self> {
         // Validate options
         if options.participants.len() < 2 {
-            return Err(ArkiveError::internal("Lottery requires at least 2 participants"));
+            return Err(ArkiveError::internal(
+                "Lottery requires at least 2 participants",
+            ));
         }
 
         // Create spending scripts
         let scripts = Self::create_scripts(&options)?;
-        
+
         // Build taproot tree
         let spend_info = Self::build_full_taproot_tree(secp, &scripts, &options)?;
 
@@ -88,11 +90,10 @@ impl LotteryEscrowScript {
         let coordinator_resolve = csv_sig_script(options.claim_timeout, options.coordinator);
 
         // Emergency exit: All participants can exit after long timeout
-        let emergency_timeout = Sequence::from_consensus(options.claim_timeout.to_consensus_u32() * 2);
-        let emergency_exit = Self::create_emergency_script(
-            &options.participants,
-            emergency_timeout,
-        )?;
+        let emergency_timeout =
+            Sequence::from_consensus(options.claim_timeout.to_consensus_u32() * 2);
+        let emergency_exit =
+            Self::create_emergency_script(&options.participants, emergency_timeout)?;
 
         let scripts = LotteryScripts {
             winner_claim,
@@ -104,7 +105,10 @@ impl LotteryEscrowScript {
         tracing::debug!("Created scripts:");
         tracing::debug!("  Winner claim: {} bytes", scripts.winner_claim.len());
         tracing::debug!("  Timeout refund: {} bytes", scripts.timeout_refund.len());
-        tracing::debug!("  Coordinator resolve: {} bytes", scripts.coordinator_resolve.len());
+        tracing::debug!(
+            "  Coordinator resolve: {} bytes",
+            scripts.coordinator_resolve.len()
+        );
         tracing::debug!("  Emergency exit: {} bytes", scripts.emergency_exit.len());
 
         Ok(scripts)
@@ -116,7 +120,7 @@ impl LotteryEscrowScript {
         timeout: Sequence,
     ) -> Result<ScriptBuf> {
         use bitcoin::opcodes::all::*;
-        
+
         let mut script = ScriptBuf::builder()
             .push_int(timeout.to_consensus_u32() as i64)
             .push_opcode(OP_CSV)
@@ -129,11 +133,11 @@ impl LotteryEscrowScript {
 
         // Add participant signatures (threshold could be all or majority)
         script = script.push_int(participants.len() as i64);
-        
+
         for participant in participants {
             script = script.push_x_only_key(participant);
         }
-        
+
         script = script
             .push_int(participants.len() as i64)
             .push_opcode(OP_CHECKMULTISIG);
@@ -146,7 +150,7 @@ impl LotteryEscrowScript {
         timeout: Sequence,
     ) -> Result<ScriptBuf> {
         use bitcoin::opcodes::all::*;
-        
+
         let mut script = ScriptBuf::builder()
             .push_int(timeout.to_consensus_u32() as i64)
             .push_opcode(OP_CSV)
@@ -154,11 +158,11 @@ impl LotteryEscrowScript {
 
         // Require all participants for emergency exit
         script = script.push_int(participants.len() as i64);
-        
+
         for participant in participants {
             script = script.push_x_only_key(participant);
         }
-        
+
         script = script
             .push_int(participants.len() as i64)
             .push_opcode(OP_CHECKMULTISIG);
@@ -171,34 +175,44 @@ impl LotteryEscrowScript {
         scripts: &LotteryScripts,
         _options: &LotteryEscrowOptions,
     ) -> Result<TaprootSpendInfo> {
-        let unspendable_key_str = "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
+        let unspendable_key_str =
+            "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
         let unspendable_key = PublicKey::from_str(unspendable_key_str)
             .map_err(|e| ArkiveError::internal(format!("Invalid unspendable key: {}", e)))?;
         let (unspendable_xonly, _) = unspendable_key.inner.x_only_public_key();
-    
+
         // TODO: Trying just one simple path first
         tracing::debug!("Attempting ultra-minimal tree with just winner claim");
-        
+
         let builder = TaprootBuilder::new();
-        
+
         match builder.add_leaf(0, scripts.winner_claim.clone()) {
-            Ok(single_builder) => {
-                match single_builder.finalize(secp, unspendable_xonly) {
-                    Ok(spend_info) => {
-                        tracing::info!("Successfully built ultra-minimal 1-path escrow tree");
-                        Ok(spend_info)
-                    }
-                    Err(_) => {
-                        tracing::error!("Even ultra-minimal tree failed to finalize");
-                        tracing::debug!("Winner claim script: {:?}", hex::encode(scripts.winner_claim.as_bytes()));
-                        Err(ArkiveError::internal("Failed to build even minimal escrow tree - script may be invalid"))
-                    }
+            Ok(single_builder) => match single_builder.finalize(secp, unspendable_xonly) {
+                Ok(spend_info) => {
+                    tracing::info!("Successfully built ultra-minimal 1-path escrow tree");
+                    Ok(spend_info)
                 }
-            }
+                Err(_) => {
+                    tracing::error!("Even ultra-minimal tree failed to finalize");
+                    tracing::debug!(
+                        "Winner claim script: {:?}",
+                        hex::encode(scripts.winner_claim.as_bytes())
+                    );
+                    Err(ArkiveError::internal(
+                        "Failed to build even minimal escrow tree - script may be invalid",
+                    ))
+                }
+            },
             Err(e) => {
                 tracing::error!("Failed to add even single leaf: {:?}", e);
-                tracing::debug!("Winner claim script bytes: {:?}", scripts.winner_claim.as_bytes());
-                Err(ArkiveError::internal(format!("Failed to add single leaf: {:?}", e)))
+                tracing::debug!(
+                    "Winner claim script bytes: {:?}",
+                    scripts.winner_claim.as_bytes()
+                );
+                Err(ArkiveError::internal(format!(
+                    "Failed to add single leaf: {:?}",
+                    e
+                )))
             }
         }
     }
@@ -217,7 +231,7 @@ impl LotteryEscrowScript {
             &Secp256k1::new(),
             self.spend_info.internal_key(),
             self.spend_info.merkle_root(),
-            network
+            network,
         )
     }
 

@@ -315,7 +315,7 @@ impl ArkService {
     pub fn tx_manager(&self) -> &TransactionManager {
         &self.tx_manager
     }
-    
+
     pub async fn new(
         keypair: Keypair,
         config: WalletConfig,

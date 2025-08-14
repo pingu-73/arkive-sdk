@@ -285,8 +285,25 @@ impl Storage {
         )?;
 
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS lottery_outcomes (
+                lottery_id TEXT PRIMARY KEY,
+                winner_pubkey TEXT NOT NULL,
+                total_stake INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (lottery_id) REFERENCES lottery_escrows(lottery_id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_lottery_escrows_state 
             ON lottery_escrows(state)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lottery_outcomes_winner 
+            ON lottery_outcomes(winner_pubkey)",
             [],
         )?;
 

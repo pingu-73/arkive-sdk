@@ -8,6 +8,7 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 use bitcoin::{Amount, XOnlyPublicKey};
 use clap::Subcommand;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -64,14 +65,6 @@ pub enum LotteryCommands {
 
     /// Check lottery status
     Status {
-        /// Lottery ID
-        lottery_id: String,
-    },
-
-    /// Claim winnings via Ark
-    Claim {
-        /// Wallet name
-        wallet: String,
         /// Lottery ID
         lottery_id: String,
     },
@@ -199,23 +192,40 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                     println!("Total Pot: {} sats", lottery_escrow.total_pot.to_sat());
                     println!("Participants: {}", lottery_escrow.participants.len());
 
+                    let mut participant_names = HashMap::new();
+                    for wallet_name in &wallets {
+                        if let Ok(wallet_instance) = manager.load_wallet(wallet_name).await {
+                            let (pubkey, _) = wallet_instance.keypair.x_only_public_key();
+                            participant_names.insert(pubkey, wallet_name.clone());
+                        }
+                    }
+
                     for (i, participant) in lottery_escrow.participants.iter().enumerate() {
-                        println!("  {}. {}", i + 1, participant);
+                        if let Some(name) = participant_names.get(participant) {
+                            println!("  {}. {} ({})", i + 1, name, participant);
+                        } else {
+                            println!("  {}. {}", i + 1, participant);
+                        }
                     }
 
                     println!("Created: {}", lottery_escrow.created_at);
                     println!("Reveal Deadline: {}", lottery_escrow.reveal_deadline);
                     println!("Claim Deadline: {}", lottery_escrow.claim_deadline);
 
-                    // Show funding status
                     if !lottery_escrow.funding_vtxos.is_empty() {
                         println!("\nFunding Status:");
                         for (i, funding) in lottery_escrow.funding_vtxos.iter().enumerate() {
+                            let participant_display =
+                                if let Some(name) = participant_names.get(&funding.participant) {
+                                    format!("{} ({})", name, funding.participant)
+                                } else {
+                                    funding.participant.to_string()
+                                };
                             println!(
                                 "  {}. {} sats from {}",
                                 i + 1,
                                 funding.amount.to_sat(),
-                                funding.participant
+                                participant_display
                             );
                         }
                     }
@@ -235,6 +245,33 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                             revealed,
                             lottery_escrow.participants.len()
                         );
+                    }
+
+                    if lottery_escrow.state == crate::commands::game::LotteryState::WinnerDetermined
+                    {
+                        match game_service
+                            .lottery_coordinator()
+                            .load_lottery_outcome(&lottery_id)
+                            .await
+                        {
+                            Ok(Some(outcome)) => {
+                                println!("\n🏆 Winner Determined!");
+                                let winner_display =
+                                    if let Some(name) = participant_names.get(&outcome.winner) {
+                                        format!("{} ({})", name, outcome.winner)
+                                    } else {
+                                        outcome.winner.to_string()
+                                    };
+                                println!("  Winner: {}", winner_display);
+                                println!("  Prize: {} sats", outcome.total_stake);
+                            }
+                            Ok(None) => {
+                                println!("\n⚠️  Winner determined but outcome data not found");
+                            }
+                            Err(e) => {
+                                println!("\n⚠️  Could not load winner info: {}", e);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -344,62 +381,6 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
             Ok(())
         }
 
-        LotteryCommands::Claim { wallet, lottery_id } => {
-            let wallet = manager.load_wallet(&wallet).await?;
-
-            println!("Claiming Ark VTXO lottery winnings for {}...", lottery_id);
-
-            // Load outcome
-            let game_service = wallet.get_game_service();
-            let conn = game_service.storage.get_connection().await;
-            let (pubkey, _) = wallet.keypair.x_only_public_key();
-
-            // Check if winner
-            let result = conn.query_row(
-                "SELECT winner_pubkey, total_stake FROM game_outcomes 
-                 JOIN game_escrows ON game_outcomes.escrow_id = game_escrows.escrow_id
-                 WHERE game_outcomes.escrow_id = ?1",
-                rusqlite::params![&lottery_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            );
-
-            match result {
-                Ok((winner_str, pot)) => {
-                    let winner = XOnlyPublicKey::from_str(&winner_str).map_err(|e| {
-                        ArkiveError::internal(format!("Invalid winner pubkey: {}", e))
-                    })?;
-
-                    if winner != pubkey {
-                        return Err(ArkiveError::internal("You are not the winner"));
-                    }
-
-                    println!("✅ You are the winner!");
-                    println!("💰 Pot: {} sats", pot);
-
-                    // The actual claiming happens through batch swaps
-                    // The losing VTXOs are forfeited and the winner gets the combined amount
-                    println!("\n📋 The winnings will be consolidated in your next batch swap.");
-                    println!("The Ark operator will process forfeit transactions from losers.");
-                    println!("\nYour balance should update after the next round completes.");
-
-                    // Mark as claimed
-                    conn.execute(
-                        "UPDATE game_outcomes SET payout_psbt = ?1 WHERE escrow_id = ?2",
-                        rusqlite::params![
-                            format!("ark_claimed_{}", chrono::Utc::now().timestamp()),
-                            &lottery_id,
-                        ],
-                    )?;
-                }
-                Err(_) => {
-                    println!("❌ Lottery outcome not found or not yet resolved.");
-                    println!("Make sure all players have revealed their secrets.");
-                }
-            }
-
-            Ok(())
-        }
-
         LotteryCommands::Status { lottery_id } => {
             // Load any wallet to get game service
             let wallets = manager.list_wallets().await?;
@@ -420,23 +401,41 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                     println!("Total Pot: {} sats", lottery_escrow.total_pot.to_sat());
                     println!("Participants: {}", lottery_escrow.participants.len());
 
+                    // Map pubkeys to wallet names
+                    let mut participant_names = HashMap::new();
+                    for wallet_name in &wallets {
+                        if let Ok(wallet_instance) = manager.load_wallet(wallet_name).await {
+                            let (pubkey, _) = wallet_instance.keypair.x_only_public_key();
+                            participant_names.insert(pubkey, wallet_name.clone());
+                        }
+                    }
+
                     for (i, participant) in lottery_escrow.participants.iter().enumerate() {
-                        println!("  {}. {}", i + 1, participant);
+                        if let Some(name) = participant_names.get(participant) {
+                            println!("  {}. {} ({})", i + 1, name, participant);
+                        } else {
+                            println!("  {}. {}", i + 1, participant);
+                        }
                     }
 
                     println!("Created: {}", lottery_escrow.created_at);
                     println!("Reveal Deadline: {}", lottery_escrow.reveal_deadline);
                     println!("Claim Deadline: {}", lottery_escrow.claim_deadline);
 
-                    // Show funding status
                     if !lottery_escrow.funding_vtxos.is_empty() {
                         println!("\nFunding Status:");
                         for (i, funding) in lottery_escrow.funding_vtxos.iter().enumerate() {
+                            let participant_display =
+                                if let Some(name) = participant_names.get(&funding.participant) {
+                                    format!("{} ({})", name, funding.participant)
+                                } else {
+                                    funding.participant.to_string()
+                                };
                             println!(
                                 "  {}. {} sats from {}",
                                 i + 1,
                                 funding.amount.to_sat(),
-                                funding.participant
+                                participant_display
                             );
                         }
                     }
@@ -456,6 +455,33 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
                             revealed,
                             lottery_escrow.participants.len()
                         );
+                    }
+
+                    if lottery_escrow.state == crate::commands::game::LotteryState::WinnerDetermined
+                    {
+                        match game_service
+                            .lottery_coordinator()
+                            .load_lottery_outcome(&lottery_id)
+                            .await
+                        {
+                            Ok(Some(outcome)) => {
+                                println!("\n🏆 Winner Determined!");
+                                let winner_display =
+                                    if let Some(name) = participant_names.get(&outcome.winner) {
+                                        format!("{} ({})", name, outcome.winner)
+                                    } else {
+                                        outcome.winner.to_string()
+                                    };
+                                println!("  Winner: {}", winner_display);
+                                println!("  Prize: {} sats", outcome.total_stake);
+                            }
+                            Ok(None) => {
+                                println!("\n⚠️  Winner determined but outcome data not found");
+                            }
+                            Err(e) => {
+                                println!("\n⚠️  Could not load winner info: {}", e);
+                            }
+                        }
                     }
 
                     // Show next action based on state

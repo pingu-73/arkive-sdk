@@ -287,16 +287,19 @@ impl LotteryCoordinator {
         use bitcoin::hashes::{sha256, Hash};
         use sha2::{Digest, Sha256};
 
-        // Combine all reveals to generate seed
+        // Combine all reveals to generate seed - ORDER MATTERS!
         let mut combined = Vec::new();
 
-        // Sort reveals deterministically by participant pubkey
-        let mut sorted_reveals: Vec<(&XOnlyPublicKey, &Reveal)> = lottery.reveals.iter().collect();
-        sorted_reveals.sort_by_key(|(pubkey, _)| pubkey.to_string()); // to_string() for sorting
+        // Sort reveals deterministically by participant pubkey to ensure consistent ordering
+        let mut sorted_participants: Vec<&XOnlyPublicKey> = lottery.participants.iter().collect();
+        sorted_participants.sort_by_key(|pubkey| pubkey.to_string());
 
-        for (_, reveal) in sorted_reveals {
-            combined.extend_from_slice(&reveal.preimage);
-            combined.extend_from_slice(&reveal.nonce);
+        // Process reveals in the same order for all participants
+        for participant in sorted_participants {
+            if let Some(reveal) = lottery.reveals.get(participant) {
+                combined.extend_from_slice(&reveal.preimage);
+                combined.extend_from_slice(&reveal.nonce);
+            }
         }
 
         // Generate deterministic seed
@@ -306,6 +309,13 @@ impl LotteryCoordinator {
         // Winner is seed % num_participants
         let winner_index = (seed_num % lottery.participants.len() as u64) as usize;
         let winner = lottery.participants[winner_index];
+
+        tracing::info!("Lottery winner calculation:");
+        tracing::info!("  Seed: {}", hex::encode(&seed[0..8]));
+        tracing::info!("  Seed num: {}", seed_num);
+        tracing::info!("  Num participants: {}", lottery.participants.len());
+        tracing::info!("  Winner index: {}", winner_index);
+        tracing::info!("  Winner pubkey: {}", winner);
 
         // Create payout map (winner gets entire pot)
         let mut payouts = HashMap::new();
@@ -329,7 +339,31 @@ impl LotteryCoordinator {
             },
         };
 
+        self.store_lottery_outcome(&lottery.lottery_id, &proof)
+            .await?;
+
         Ok(proof)
+    }
+
+    async fn store_lottery_outcome(&self, lottery_id: &str, outcome: &GameOutcome) -> Result<()> {
+        let conn = self.storage.get_connection().await;
+
+        let winner_pubkey = outcome.winner.to_string();
+        let total_stake: u64 = outcome.payouts.values().cloned().sum::<Amount>().to_sat();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO lottery_outcomes 
+             (lottery_id, winner_pubkey, total_stake, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                lottery_id,
+                winner_pubkey,
+                total_stake as i64,
+                chrono::Utc::now().timestamp(),
+            ],
+        )?;
+
+        Ok(())
     }
 
     /// Execute winner payout using forfeit transactions
@@ -346,22 +380,23 @@ impl LotteryCoordinator {
         }
 
         // Create forfeit transactions for losers
-        let mut forfeit_txs = Vec::new();
+        let mut forfeit_tx_outpoints = Vec::new();
 
         for funding in &lottery.funding_vtxos {
             if funding.participant != winner {
                 // This VTXO will be forfeited to winner
                 // create actual forfeit transaction
-                forfeit_txs.push(funding.vtxo_outpoint);
+                forfeit_tx_outpoints.push(funding.vtxo_outpoint.to_string());
             }
         }
 
-        // TODO: Execute batch swap to consolidate winnings
-        let swap_id = ark_service
-            .batch_swap(Some(forfeit_txs.iter().map(|o| o.to_string()).collect()))
-            .await?;
+        if !forfeit_tx_outpoints.is_empty() {
+            let swap_id = ark_service.batch_swap(Some(forfeit_tx_outpoints)).await?;
 
-        Ok(swap_id.unwrap_or_else(|| "pending".to_string()))
+            Ok(swap_id.unwrap_or_else(|| "pending".to_string()))
+        } else {
+            Ok("no_forfeit_needed".to_string())
+        }
     }
 
     #[allow(dead_code)]
@@ -411,6 +446,41 @@ impl LotteryCoordinator {
     pub async fn update_lottery_escrow(&self, lottery: &LotteryEscrow) -> Result<()> {
         self.store_lottery_escrow(lottery).await
     }
+
+    pub async fn load_lottery_outcome(&self, lottery_id: &str) -> Result<Option<LotteryOutcome>> {
+        let conn = self.storage.get_connection().await;
+
+        let result = conn.query_row(
+            "SELECT winner_pubkey, total_stake FROM lottery_outcomes WHERE lottery_id = ?1",
+            rusqlite::params![lottery_id],
+            |row| {
+                let winner_pubkey: String = row.get(0)?;
+                let total_stake: i64 = row.get(1)?;
+                Ok(LotteryOutcome {
+                    winner: XOnlyPublicKey::from_str(&winner_pubkey).map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            "winner_pubkey".to_string(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?,
+                    total_stake: total_stake as u64,
+                })
+            },
+        );
+
+        match result {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(ArkiveError::Storage(e)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LotteryOutcome {
+    pub winner: XOnlyPublicKey,
+    pub total_stake: u64,
 }
 
 /// Enhanced lottery escrow structure

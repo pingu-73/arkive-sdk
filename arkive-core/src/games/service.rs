@@ -305,18 +305,18 @@ impl GameService {
 
         while attempts < max_attempts {
             // Check transaction status through Ark service
-            match self
-                .check_ark_transaction_status(ark_service.clone(), txid)
-                .await
-            {
+            if let Err(e) = ark_service.force_sync_with_server().await {
+                tracing::warn!("Failed to sync with server: {}", e);
+            }
+
+            match self.check_vtxo_exists(ark_service.clone(), txid).await {
                 Ok(true) => {
-                    tracing::info!("Ark transaction {} confirmed", txid);
+                    tracing::info!("Ark transaction {} confirmed in VTXO", txid);
                     return Ok(());
                 }
                 Ok(false) => {
-                    // Still pending, wait and retry
                     tracing::debug!(
-                        "Transaction {} still pending, attempt {}/{}",
+                        "Transaction {} not yet in VTXOs, attempt {}/{}",
                         txid,
                         attempts + 1,
                         max_attempts
@@ -325,7 +325,7 @@ impl GameService {
                     attempts += 1;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to check transaction status: {}", e);
+                    tracing::warn!("Failed to check VTXO status: {}", e);
                     tokio::time::sleep(poll_interval).await;
                     attempts += 1;
                 }
@@ -335,6 +335,28 @@ impl GameService {
         // Even if we timeout, the transaction might still succeed
         tracing::warn!("Timeout waiting for Ark transaction {} confirmation, but transaction may still succeed", txid);
         Ok(())
+    }
+
+    async fn check_vtxo_exists(
+        &self,
+        ark_service: Arc<ArkService>,
+        txid: &bitcoin::Txid,
+    ) -> Result<bool> {
+        // Get current VTXOs and check if our transaction is among them
+        match ark_service.list_vtxos().await {
+            Ok(vtxos) => {
+                // Look for VTXOs that originated from our transaction
+                for vtxo in vtxos {
+                    if vtxo.outpoint.starts_with(&txid.to_string()[..8])
+                        || vtxo.commitment_txids.contains(&txid.to_string())
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Err(_) => Ok(false),
+        }
     }
 
     pub async fn check_ark_transaction_status(

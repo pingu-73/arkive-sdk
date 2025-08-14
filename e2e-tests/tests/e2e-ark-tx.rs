@@ -19,14 +19,14 @@ async fn test_basic_boarding_and_ark_transaction() -> Result<()> {
     info!("Bob Ark address: {}", bob_ark_addr);
 
     // Alice boards funds
-    let funding_amount = 1.0;
+    let funding_amount = 1.5;
     let round_result = alice.board_funds(&env, funding_amount).await?;
     info!(
         "Alice successfully boarded funds in round: {}",
         round_result
     );
 
-    alice.wait_for_balance(100_000_000, 0, 60).await?;
+    alice.wait_for_balance(150_000_000, 0, 60).await?;
 
     let (alice_confirmed, alice_pending) = alice.get_balance().await?;
     info!(
@@ -36,13 +36,13 @@ async fn test_basic_boarding_and_ark_transaction() -> Result<()> {
     );
 
     // Alice sends some sats to Bob
-    let send_amount = 50_000_000;
+    let send_amount = 75_000_000;
     info!("Alice sending {} sats to Bob...", send_amount);
 
     let tx_id = alice.send_ark(&bob_ark_addr, send_amount).await?;
     info!("Transaction sent: {}", tx_id);
 
-    let expected_alice_remaining = 100_000_000 - send_amount - ARK_TRANSACTION_FEE;
+    let expected_alice_remaining = 150_000_000 - send_amount - ARK_TRANSACTION_FEE;
     alice
         .wait_for_balance(0, expected_alice_remaining, 30)
         .await?;

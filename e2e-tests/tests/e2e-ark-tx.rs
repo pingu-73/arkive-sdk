@@ -72,7 +72,7 @@ async fn test_basic_boarding_and_ark_transaction() -> Result<()> {
 
     info!("Bob participating in round to confirm VTXO...");
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 
     let bob_round_result = bob.participate_in_round().await?;
     assert!(

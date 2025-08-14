@@ -122,8 +122,8 @@ jobs:
           nigiri rpc generatetoaddress 405 $(nigiri rpc getnewaddress)
           admin_wallet=$(curl -s http://localhost:7070/v1/admin/wallet/address | jq -r '.address')
           forfeit_address=$(curl -s http://localhost:7070/v1/info | jq -r '.forfeitAddress')
-          nigiri faucet $"forfeit_address" 100
-          nigiri faucet $"admin_wallet" 100
+          nigiri faucet $forfeit_address 100
+          nigiri faucet $admin_wallet 100
           nigiri rpc generatetoaddress 405 $(nigiri rpc getnewaddress)
 
           echo "Running E2E tests..."

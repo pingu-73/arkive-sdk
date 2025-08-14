@@ -188,13 +188,183 @@ impl LotteryCoordinator {
     }
 
     /// Submit reveal with escrow coordination
+    // pub async fn submit_reveal_with_escrow(
+    //     &self,
+    //     lottery_id: &str,
+    //     participant: XOnlyPublicKey,
+    //     reveal: Reveal,
+    // ) -> Result<Option<GameOutcome>> {
+    //     let mut lottery = self.load_lottery_escrow(lottery_id).await?;
+    
+    //     // Verify state
+    //     if lottery.state != LotteryState::RevealPhase {
+    //         return Err(ArkiveError::internal("Not in reveal phase"));
+    //     }
+    
+    //     // Verify participant is in lottery
+    //     if !lottery.participants.contains(&participant) {
+    //         return Err(ArkiveError::internal("Not a participant in this lottery"));
+    //     }
+    
+    //     // Verify participant has committed
+    //     let commitment = lottery.commitments.get(&participant)
+    //         .ok_or_else(|| ArkiveError::internal("No commitment found for participant"))?;
+    
+    //     // Verify reveal matches commitment
+    //     let valid = self.verify_reveal(commitment, &reveal, &participant)?;
+    //     if !valid {
+    //         return Err(ArkiveError::internal("Invalid reveal - does not match commitment"));
+    //     }
+    
+    //     // Store reveal
+    //     lottery.reveals.insert(participant, reveal);
+    
+    //     // Check if all revealed
+    //     if lottery.reveals.len() == lottery.participants.len() {
+    //         // Calculate winner
+    //         let outcome = self.calculate_winner(&lottery).await?;
+    //         lottery.state = LotteryState::WinnerDetermined;
+            
+    //         self.update_lottery_escrow(&lottery).await?;
+            
+    //         return Ok(Some(outcome));
+    //     }
+    
+    //     self.update_lottery_escrow(&lottery).await?;
+    //     Ok(None)
+    // }
     pub async fn submit_reveal_with_escrow(
         &self,
         lottery_id: &str,
         participant: XOnlyPublicKey,
         reveal: Reveal,
     ) -> Result<Option<GameOutcome>> {
-        todo!("to be implemented")
+        let mut lottery = self.load_lottery_escrow(lottery_id).await?;
+
+        // Verify state
+        if lottery.state != LotteryState::RevealPhase {
+            return Err(ArkiveError::internal("Not in reveal phase"));
+        }
+
+        // Verify participant is in lottery
+        if !lottery.participants.contains(&participant) {
+            return Err(ArkiveError::internal("Not a participant in this lottery"));
+        }
+
+        // Verify participant has committed
+        let commitment = lottery.commitments.get(&participant)
+            .ok_or_else(|| ArkiveError::internal("No commitment found for participant"))?;
+
+        // Verify reveal matches commitment (PASS THE LOTTERY_ID!)
+        let valid = self.verify_reveal(commitment, &reveal, &participant, lottery_id)?;
+        if !valid {
+            return Err(ArkiveError::internal("Invalid reveal - does not match commitment"));
+        }
+
+        // Store reveal
+        lottery.reveals.insert(participant, reveal);
+
+        // Check if all revealed
+        if lottery.reveals.len() == lottery.participants.len() {
+            // Calculate winner
+            let outcome = self.calculate_winner(&lottery).await?;
+            lottery.state = LotteryState::WinnerDetermined;
+            
+            self.update_lottery_escrow(&lottery).await?;
+            
+            return Ok(Some(outcome));
+        }
+
+        self.update_lottery_escrow(&lottery).await?;
+        Ok(None)
+    }
+
+    fn verify_reveal(
+        &self,
+        commitment: &Commitment,
+        reveal: &Reveal,
+        participant: &XOnlyPublicKey,
+        lottery_id: &str,
+    ) -> Result<bool> {
+        use bitcoin::secp256k1::{Message, Secp256k1};
+        use sha2::{Sha256, Digest};
+    
+        let secp = Secp256k1::new();
+    
+        let mut hasher = Sha256::new();
+        hasher.update(&reveal.preimage);
+        hasher.update(&reveal.nonce);
+        hasher.update(lottery_id.as_bytes()); 
+        hasher.update(&participant.serialize());
+        let computed_hash = hasher.finalize();
+    
+        // Verify hash matches commitment
+        if computed_hash.as_slice() != &commitment.hash {
+            tracing::warn!("Hash mismatch - computed: {}, expected: {}", 
+                          hex::encode(&computed_hash), 
+                          hex::encode(&commitment.hash));
+            return Ok(false);
+        }
+    
+        // Verify commitment signature
+        let commit_msg = Message::from_digest_slice(&commitment.hash)
+            .map_err(|e| ArkiveError::internal(format!("Invalid commitment message: {}", e)))?;
+        
+        secp.verify_schnorr(&commitment.signature, &commit_msg, participant)
+            .map_err(|e| ArkiveError::internal(format!("Invalid commitment signature: {}", e)))?;
+    
+        // Verify reveal signature  
+        let reveal_msg = Message::from_digest_slice(&reveal.preimage)
+            .map_err(|e| ArkiveError::internal(format!("Invalid reveal message: {}", e)))?;
+        
+        secp.verify_schnorr(&reveal.signature, &reveal_msg, participant)
+            .map_err(|e| ArkiveError::internal(format!("Invalid reveal signature: {}", e)))?;
+    
+        Ok(true)
+    }
+
+    async fn calculate_winner(&self, lottery: &LotteryEscrow) -> Result<GameOutcome> {
+        use bitcoin::hashes::{sha256, Hash};
+        use sha2::{Sha256, Digest};
+    
+        // Combine all reveals to generate seed
+        let mut combined = Vec::new();
+        
+        // Sort reveals deterministically by participant pubkey (FIXED VERSION)
+        let mut sorted_reveals: Vec<(&XOnlyPublicKey, &Reveal)> = lottery.reveals.iter().collect();
+        sorted_reveals.sort_by_key(|(pubkey, _)| pubkey.to_string()); // Use to_string() for sorting
+    
+        for (_, reveal) in sorted_reveals {
+            combined.extend_from_slice(&reveal.preimage);
+            combined.extend_from_slice(&reveal.nonce);
+        }
+    
+        // Generate deterministic seed
+        let seed = sha256::Hash::hash(&combined).to_byte_array();
+        let seed_num = u64::from_le_bytes(seed[0..8].try_into().unwrap());
+    
+        // Winner is seed % num_participants
+        let winner_index = (seed_num % lottery.participants.len() as u64) as usize;
+        let winner = lottery.participants[winner_index];
+    
+        // Create payout map (winner gets entire pot)
+        let mut payouts = HashMap::new();
+        payouts.insert(winner, lottery.total_pot);
+    
+        // Create proof data
+        let proof = super::GameOutcome {
+            winner,
+            runner_ups: lottery.participants.iter().filter(|&p| *p != winner).cloned().collect(),
+            payouts,
+            proof: super::OutcomeProof {
+                seed,
+                commitments: lottery.commitments.values().cloned().collect(),
+                reveals: lottery.reveals.values().cloned().collect(),
+                calculation: combined, // Store for verification
+            },
+        };
+    
+        Ok(proof)
     }
 
     /// Execute winner payout using forfeit transactions
@@ -230,7 +400,7 @@ impl LotteryCoordinator {
     }
 
     async fn determine_winner(&self, lottery: &LotteryEscrow) -> Result<GameOutcome> {
-        todo!("to be implemented")
+        self.calculate_winner(lottery).await
     }
 
     async fn store_lottery_escrow(&self, lottery: &LotteryEscrow) -> Result<()> {

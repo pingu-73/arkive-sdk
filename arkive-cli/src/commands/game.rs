@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use arkive_core::games::service::GameService;
-use arkive_core::games::{Commitment, EscrowState, GameEscrow, GameOutcome, Participant, Reveal};
+use arkive_core::games::{Commitment, EscrowState, GameEscrow, GameOutcome, Participant, Reveal, LotteryState};
 use arkive_core::{ArkAddress, ArkiveError, Result, WalletManager};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
@@ -277,100 +277,64 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
         }
 
         LotteryCommands::Reveal { wallet, lottery_id } => {
-            let wallet = manager.load_wallet(&wallet).await?;
-
-            println!("Revealing secret for Ark VTXO lottery {}...", lottery_id);
-
+            let wallet_instance = manager.load_wallet(&wallet).await?;
+            let (participant_pubkey, _) = wallet_instance.keypair.x_only_public_key();
+        
+            println!("Revealing secret for escrow lottery {}...", lottery_id);
+        
             // Load secret
-            let (secret, nonce) = load_lottery_secret(&lottery_id)?;
-
-            // Create and store reveal
-            let reveal = create_reveal(&secret, &nonce, &wallet.keypair)?;
-            let game_service = wallet.get_game_service();
-            let conn = game_service.storage.get_connection().await;
-            let (pubkey, _) = wallet.keypair.x_only_public_key();
-
-            conn.execute(
-                "UPDATE game_commitments 
-                 SET reveal_preimage = ?1, reveal_nonce = ?2, reveal_signature = ?3
-                 WHERE escrow_id = ?4 AND participant_pubkey = ?5",
-                rusqlite::params![
-                    hex::encode(reveal.preimage),
-                    hex::encode(reveal.nonce),
-                    hex::encode(reveal.signature.as_ref()),
-                    &lottery_id,
-                    pubkey.to_string(),
-                ],
-            )?;
-
-            println!("✅ Secret revealed!");
-
-            // Check if all revealed
-            let reveal_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM game_commitments 
-                 WHERE escrow_id = ?1 AND reveal_preimage IS NOT NULL",
-                rusqlite::params![&lottery_id],
-                |row| row.get(0),
-            )?;
-
-            let participants: String = conn.query_row(
-                "SELECT participants FROM game_escrows WHERE escrow_id = ?1",
-                rusqlite::params![&lottery_id],
-                |row| row.get(0),
-            )?;
-            let participants: Vec<String> = serde_json::from_str(&participants)?;
-
-            if reveal_count == participants.len() as i64 {
-                println!("\n🎲 All secrets revealed! Calculating winner...");
-
-                // Calculate winner
-                let outcome = calculate_winner_with_ark(&conn, &lottery_id, &wallet).await?;
-
-                if outcome.winner == pubkey {
-                    println!(
-                        "\n🎉 CONGRATULATIONS! You won {} sats!",
-                        outcome.total_pot.to_sat()
-                    );
-                    println!("The pot will be transferred to you via Ark in the next batch swap.");
-                    println!(
-                        "Run: arkive game lottery claim --wallet {} {}",
-                        wallet.name(),
-                        lottery_id
-                    );
+            // let (secret, nonce) = load_lottery_secret(&lottery_id)?;
+            let (secret, nonce) = load_lottery_secret(&lottery_id, &participant_pubkey)?;
+        
+            // Create reveal with proper signatures
+            let reveal = create_reveal(&secret, &nonce, &wallet_instance.keypair)?;
+            
+            let game_service = wallet_instance.get_game_service();
+        
+            // Submit reveal to lottery coordinator
+            let outcome_option = game_service
+                .submit_escrow_reveal(&lottery_id, participant_pubkey, reveal)
+                .await?;
+        
+            println!("✅ Secret revealed for lottery {}", lottery_id);
+            println!("Preimage: {}", hex::encode(&secret));
+            println!("Nonce: {}", hex::encode(&nonce));
+        
+            // Check if all revealed and determine winner
+            if let Some(outcome) = outcome_option {
+                if outcome.winner == participant_pubkey {
+                    println!("\n🎉 CONGRATULATIONS! You won the lottery!");
+                    let winner_payout = outcome.payouts.get(&outcome.winner)
+                        .map(|amt| amt.to_sat())
+                        .unwrap_or(0);
+                    println!("💰 Prize: {} sats", winner_payout);
+                    println!("The winnings will be available in your Ark wallet shortly.");
                 } else {
-                    println!("\n😔 You lost. Winner: {}", outcome.winner);
-                    println!("Your entry fee VTXO will be forfeited to the winner.");
+                    println!("\n😔 You lost this round.");
+                    println!("Winner: {}", outcome.winner);
+                    println!("Better luck next time!");
                 }
-
-                // Update state
-                conn.execute(
-                    "UPDATE game_escrows SET state = ?1 WHERE escrow_id = ?2",
-                    rusqlite::params![serde_json::to_string(&EscrowState::Resolved)?, &lottery_id,],
-                )?;
-
-                // Trigger batch swap for settlement
-                println!("\n📦 Triggering Ark batch swap for lottery settlement...");
-                match wallet.batch_swap(None).await {
-                    Ok(Some(swap_id)) => {
-                        println!("✅ Batch swap initiated: {}", swap_id);
-                        println!("This will consolidate the lottery and transfer winnings.");
-                    }
-                    Ok(None) => {
-                        println!("⏳ Batch swap will be triggered in the next round.");
+                
+                // Trigger payout processing
+                println!("\n📦 Processing lottery payout...");
+                let ark_service = wallet_instance.get_ark_service().await?;
+                match game_service.lottery_coordinator()
+                    .execute_winner_payout(&lottery_id, outcome.winner, &ark_service)
+                    .await {
+                    Ok(swap_id) => {
+                        println!("✅ Payout initiated via batch swap: {}", swap_id);
+                        println!("Run 'arkive ark sync {}' to claim your winnings", wallet);
                     }
                     Err(e) => {
-                        println!("⚠️  Batch swap failed: {}", e);
-                        println!("You may need to manually trigger it later.");
+                        println!("⚠️  Payout processing failed: {}", e);
+                        println!("You may need to contact support or manually claim.");
                     }
                 }
             } else {
-                println!(
-                    "Reveals: {}/{} - Waiting for other player(s)...",
-                    reveal_count,
-                    participants.len()
-                );
+                println!("Reveal submitted. Waiting for other participants...");
+                println!("Run this command again if you think all reveals are complete.");
             }
-
+        
             Ok(())
         }
 
@@ -431,111 +395,93 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
         }
 
         LotteryCommands::Status { lottery_id } => {
-            println!("Ark VTXO Lottery Status: {}", lottery_id);
-            println!("════════════════════════════");
-
-            // Load from any wallet's storage
+            // Load any wallet to get game service
             let wallets = manager.list_wallets().await?;
             if wallets.is_empty() {
-                return Err(ArkiveError::internal("No wallets found"));
+                return Err(ArkiveError::internal("No wallets available"));
             }
-
+        
             let wallet = manager.load_wallet(&wallets[0]).await?;
             let game_service = wallet.get_game_service();
-            let conn = game_service.storage.get_connection().await;
-
-            // Get lottery info
-            let result = conn.query_row(
-                "SELECT state, participants, total_stake, timeout_block, taproot_address 
-                 FROM game_escrows WHERE escrow_id = ?1",
-                rusqlite::params![&lottery_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                },
-            );
-
-            match result {
-                Ok((state_str, participants_str, stake, timeout, escrow_addr)) => {
-                    let state: EscrowState = serde_json::from_str(&state_str)?;
-                    let participants: Vec<String> = serde_json::from_str(&participants_str)?;
-
-                    println!("State: {:?}", state);
-                    println!("Participants: {}/2", participants.len());
-                    println!("Total pot: {} sats", stake);
-                    println!("Timeout block: {}", timeout);
-                    println!("Escrow Ark address: {}...", &escrow_addr[..20]);
-                    println!("Payment method: Ark VTXOs");
-
-                    // Show participants
-                    if !participants.is_empty() {
-                        println!("\nParticipants:");
-                        for (i, p) in participants.iter().enumerate() {
-                            println!("  {}. {}...", i + 1, &p[..16]);
+        
+            match game_service.load_lottery_escrow(&lottery_id).await {
+                Ok(lottery_escrow) => {
+                    println!("Escrow Lottery Status: {}", lottery_id);
+                    println!("════════════════════════════════════");
+                    println!("State: {:?}", lottery_escrow.state);
+                    println!("Escrow Address: {}", lottery_escrow.escrow_address);
+                    println!("Entry Fee: {} sats", lottery_escrow.entry_fee.to_sat());
+                    println!("Total Pot: {} sats", lottery_escrow.total_pot.to_sat());
+                    println!("Participants: {}", lottery_escrow.participants.len());
+        
+                    for (i, participant) in lottery_escrow.participants.iter().enumerate() {
+                        println!("  {}. {}", i + 1, participant);
+                    }
+        
+                    println!("Created: {}", lottery_escrow.created_at);
+                    println!("Reveal Deadline: {}", lottery_escrow.reveal_deadline);
+                    println!("Claim Deadline: {}", lottery_escrow.claim_deadline);
+        
+                    // Show funding status
+                    if !lottery_escrow.funding_vtxos.is_empty() {
+                        println!("\nFunding Status:");
+                        for (i, funding) in lottery_escrow.funding_vtxos.iter().enumerate() {
+                            println!(
+                                "  {}. {} sats from {}",
+                                i + 1,
+                                funding.amount.to_sat(),
+                                funding.participant
+                            );
                         }
                     }
-
-                    // Check commitments and reveals
-                    let commits: i64 = conn
-                        .query_row(
-                            "SELECT COUNT(*) FROM game_commitments 
-                         WHERE escrow_id = ?1 AND commitment_signature IS NOT NULL",
-                            rusqlite::params![&lottery_id],
-                            |row| row.get(0),
-                        )
-                        .unwrap_or(0);
-
-                    let reveals: i64 = conn
-                        .query_row(
-                            "SELECT COUNT(*) FROM game_commitments 
-                         WHERE escrow_id = ?1 AND reveal_preimage IS NOT NULL",
-                            rusqlite::params![&lottery_id],
-                            |row| row.get(0),
-                        )
-                        .unwrap_or(0);
-
-                    if commits > 0 || reveals > 0 {
+        
+                    // Show commitment/reveal status
+                    let committed = lottery_escrow.commitments.len();
+                    let revealed = lottery_escrow.reveals.len();
+                    if committed > 0 || revealed > 0 {
                         println!("\nProgress:");
-                        println!("  Commitments: {}/{}", commits, participants.len());
-                        println!("  Reveals: {}/{}", reveals, participants.len());
+                        println!(
+                            "  Committed: {}/{}",
+                            committed,
+                            lottery_escrow.participants.len()
+                        );
+                        println!(
+                            "  Revealed: {}/{}",
+                            revealed,
+                            lottery_escrow.participants.len()
+                        );
                     }
-
-                    // Check for winner
-                    if let Ok(winner) = conn.query_row::<String, _, _>(
-                        "SELECT winner_pubkey FROM game_outcomes WHERE escrow_id = ?1",
-                        rusqlite::params![&lottery_id],
-                        |row| row.get(0),
-                    ) {
-                        println!("\n🏆 Winner: {}...", &winner[..16]);
-                    }
-
+        
                     // Show next action based on state
-                    match state {
-                        EscrowState::Gathering => {
-                            println!("\n📋 Next: Wait for all players to join");
+                    match lottery_escrow.state {
+                        LotteryState::AwaitingFunding => {
+                            println!("\n📋 Next: Wait for all participants to fund escrow");
                         }
-                        EscrowState::CommitPhase => {
-                            println!("\n📋 Next: All players should commit their random values");
+                        LotteryState::CommitmentPhase => {
+                            println!("\n📋 Next: All participants should commit their random values");
                         }
-                        EscrowState::RevealPhase => {
-                            println!("\n📋 Next: All players should reveal their secrets");
+                        LotteryState::RevealPhase => {
+                            println!("\n📋 Next: All participants should reveal their secrets");
                         }
-                        EscrowState::Resolved => {
-                            println!("\n✅ Lottery complete! Winner can claim the pot.");
+                        LotteryState::WinnerDetermined => {
+                            println!("\n🏆 Winner determined! Processing payouts...");
                         }
-                        _ => {}
+                        LotteryState::Completed => {
+                            println!("\n✅ Lottery complete!");
+                        }
+                        LotteryState::TimedOut => {
+                            println!("\n⏰ Lottery timed out");
+                        }
+                        LotteryState::Disputed => {
+                            println!("\n⚠️  Lottery disputed");
+                        }
                     }
                 }
-                Err(_) => {
-                    println!("Lottery not found: {}", lottery_id);
+                Err(e) => {
+                    println!("❌ Failed to load lottery: {}", e);
                 }
             }
-
+        
             Ok(())
         }
 
@@ -579,93 +525,6 @@ async fn handle_lottery_command(cmd: LotteryCommands, manager: &WalletManager) -
     }
 }
 
-async fn calculate_winner_with_ark(
-    conn: &tokio::sync::MutexGuard<'_, rusqlite::Connection>,
-    lottery_id: &str,
-    _wallet: &arkive_core::ArkWallet,
-) -> Result<LotteryOutcome> {
-    // Load reveals - need to parse the commitment_hash field properly
-    let mut stmt = conn.prepare(
-        "SELECT participant_pubkey, reveal_preimage, reveal_nonce, commitment_hash 
-         FROM game_commitments WHERE escrow_id = ?1 AND reveal_preimage IS NOT NULL",
-    )?;
-
-    let reveals: Vec<(String, Vec<u8>, Vec<u8>, String)> = stmt
-        .query_map(rusqlite::params![lottery_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                hex::decode(row.get::<_, String>(1)?).unwrap_or_default(),
-                hex::decode(row.get::<_, String>(2)?).unwrap_or_default(),
-                row.get::<_, String>(3)?, // Get the full commitment_hash field
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    // Calculate winner using provably fair algorithm
-    let mut combined = Vec::new();
-    for (_, preimage, nonce, _) in &reveals {
-        combined.extend_from_slice(preimage);
-        combined.extend_from_slice(nonce);
-    }
-
-    let seed = sha256::Hash::hash(&combined).to_byte_array();
-    let seed_num = u64::from_le_bytes(seed[0..8].try_into().unwrap());
-    let winner_index = (seed_num % reveals.len() as u64) as usize;
-
-    let winner_pubkey = XOnlyPublicKey::from_str(&reveals[winner_index].0)
-        .map_err(|e| ArkiveError::internal(format!("Invalid winner pubkey: {}", e)))?;
-
-    // Get total stake
-    let total_stake: i64 = conn.query_row(
-        "SELECT total_stake FROM game_escrows WHERE escrow_id = ?1",
-        rusqlite::params![lottery_id],
-        |row| row.get(0),
-    )?;
-
-    // Store outcome
-    conn.execute(
-        "INSERT OR REPLACE INTO game_outcomes 
-         (escrow_id, winner_pubkey, payouts, proof, finalized_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            lottery_id,
-            winner_pubkey.to_string(),
-            serde_json::to_string(&vec![(winner_pubkey.to_string(), total_stake)])?,
-            hex::encode(seed),
-            chrono::Utc::now().timestamp(),
-        ],
-    )?;
-
-    // Get the entry fee transaction IDs for forfeiting
-    let loser_txids: Vec<String> = reveals
-        .iter()
-        .filter(|(pk, _, _, _)| XOnlyPublicKey::from_str(pk).ok() != Some(winner_pubkey))
-        .filter_map(|(_, _, _, commitment_hash)| {
-            // Parse the entry_fee_txid from commitment_hash
-            commitment_hash
-                .split('|')
-                .find(|s| s.starts_with("entry_fee_txid:"))
-                .and_then(|s| s.strip_prefix("entry_fee_txid:"))
-                .map(String::from)
-        })
-        .collect();
-
-    println!("\n💸 Losing VTXOs to be forfeited: {}", loser_txids.len());
-    for txid in &loser_txids {
-        println!("   - {}", txid);
-    }
-
-    Ok(LotteryOutcome {
-        winner: winner_pubkey,
-        total_pot: Amount::from_sat(total_stake as u64),
-    })
-}
-
-struct LotteryOutcome {
-    winner: XOnlyPublicKey,
-    total_pot: Amount,
-}
-
 fn create_reveal(secret: &[u8; 32], nonce: &[u8; 32], keypair: &Keypair) -> Result<Reveal> {
     let secp = Secp256k1::new();
     let msg = Message::from_digest(*secret);
@@ -678,27 +537,41 @@ fn create_reveal(secret: &[u8; 32], nonce: &[u8; 32], keypair: &Keypair) -> Resu
     })
 }
 
-fn load_lottery_secret(lottery_id: &str) -> Result<([u8; 32], [u8; 32])> {
-    let path = dirs::data_dir()
+pub fn load_lottery_secret(
+    lottery_id: &str,
+    participant_pubkey: &XOnlyPublicKey,
+) -> Result<([u8; 32], [u8; 32])> {
+    let data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("arkive")
         .join("lottery_secrets")
         .join(format!("{}.json", lottery_id));
 
-    let data = std::fs::read_to_string(path)?;
-    let json: serde_json::Value = serde_json::from_str(&data)?;
+    let data = std::fs::read_to_string(&data_dir)
+        .map_err(|e| ArkiveError::internal(format!("Failed to read secret file: {}", e)))?;
 
-    let secret = hex::decode(json["secret"].as_str().unwrap())
+    let json: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| ArkiveError::internal(format!("Invalid secret file format: {}", e)))?;
+
+    // Get participant's secrets from the participants map
+    let participant_secrets = json["participants"][participant_pubkey.to_string()]
+        .as_object()
+        .ok_or_else(|| ArkiveError::internal("No secrets found for participant"))?;
+
+    let secret_hex = participant_secrets["secret"].as_str()
+        .ok_or_else(|| ArkiveError::internal("Missing secret for participant"))?;
+    let nonce_hex = participant_secrets["nonce"].as_str()
+        .ok_or_else(|| ArkiveError::internal("Missing nonce for participant"))?;
+
+    let secret = hex::decode(secret_hex)
         .map_err(|e| ArkiveError::internal(format!("Invalid secret hex: {}", e)))?;
-    let nonce = hex::decode(json["nonce"].as_str().unwrap())
+    let nonce = hex::decode(nonce_hex)
         .map_err(|e| ArkiveError::internal(format!("Invalid nonce hex: {}", e)))?;
 
     Ok((
-        secret
-            .try_into()
+        secret.try_into()
             .map_err(|_| ArkiveError::internal("Invalid secret length"))?,
-        nonce
-            .try_into()
+        nonce.try_into()
             .map_err(|_| ArkiveError::internal("Invalid nonce length"))?,
     ))
 }

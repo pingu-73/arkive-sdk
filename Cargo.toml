@@ -1,5 +1,5 @@
 [workspace]
-members = ["arkive-core", "arkive-cli"]
+members = ["arkive-core", "arkive-cli", "e2e-tests"]
 resolver = "2"
 
 [workspace.dependencies]

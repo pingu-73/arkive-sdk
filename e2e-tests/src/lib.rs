@@ -132,13 +132,13 @@ impl TestEnvironment {
         let admin_wallet_addr = self.get_admin_wallet_addr().await?;
 
         info!(" Funding Ark server forfeit address: {}", forfeit_addr);
-        self.nigiri_faucet(&forfeit_addr, 200.0).await?;
+        self.nigiri_faucet(&forfeit_addr, 10.0).await?;
 
         info!(" Funding admin wallet: {}", admin_wallet_addr);
-        self.nigiri_faucet(&admin_wallet_addr, 200.0).await?;
+        self.nigiri_faucet(&admin_wallet_addr, 10.0).await?;
 
         info!(" Mining block to confirm the funding");
-        self.mine_blocks(4).await?;
+        self.mine_blocks(2).await?;
 
         info!(" Ark server funded successfully");
         Ok(())

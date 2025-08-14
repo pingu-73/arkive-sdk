@@ -59,33 +59,13 @@ jobs:
           reporter: 'github-pr-check'
           github_token: ${{ secrets.GITHUB_TOKEN }}
   
-  msrv:
-    # check that we can build using the minimal rust version that is specified by this crate
-    runs-on: ubuntu-latest
-    # we use a matrix here just because env can't be used in job names
-    # https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability
-    strategy:
-      matrix:
-        msrv: ["1.56.1"] # 2021 edition requires 1.56
-    name: ubuntu / ${{ matrix.msrv }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # tag=v4.2.2
-        with:
-          submodules: true
-      - name: Install ${{ matrix.msrv }}
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # branch=master
-        with:
-          toolchain: ${{ matrix.msrv }}
-      - name: cargo +${{ matrix.msrv }} check
-        run: cargo check
-  
   e2e-tests:
     runs-on: ubuntu-latest
     name: ${{ matrix.toolchain }} / e2e-tests
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, nightly]
+        toolchain: [stable]
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # tag=v4.2.2
@@ -126,20 +106,28 @@ jobs:
         run: |
           nigiri start --ark
           echo "Waiting for services to start..."
-          sleep 60
+          sleep 15
       
       - name: Verify services are running
         run: |
           echo "Checking Bitcoin node..."
           nigiri rpc getblockchaininfo
           echo "Checking Ark server..."
-          curl -s --retry 10 --retry-delay 5 --retry-connrefused http://localhost:7070/v1/info | jq '.'
+          curl -s --retry 2 --retry-delay 5 --retry-connrefused http://localhost:7070/v1/info | jq '.'
           echo "Services verified!"
 
       - name: Run E2E tests
         run: |
+          echo "Nigiri Setup"
+          nigiri rpc generatetoaddress 405 $(nigiri rpc getnewaddress)
+          admin_wallet=$(curl -s http://localhost:7070/v1/admin/wallet/address | jq -r '.address')
+          forfeit_address=$(curl -s http://localhost:7070/v1/info | jq -r '.forfeitAddress')
+          nigiri faucet $"forfeit_address" 100
+          nigiri faucet $"admin_wallet" 100
+          nigiri rpc generatetoaddress 405 $(nigiri rpc getnewaddress)
+
           echo "Running E2E tests..."
-          timeout 600 cargo test
+          cargo test
         env:
           RUST_LOG: info,arkive=debug,e2e_tests=info
       

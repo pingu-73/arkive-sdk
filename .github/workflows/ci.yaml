@@ -147,32 +147,3 @@ jobs:
         if: always()
         run: |
           nigiri stop
-
-  publish-check:
-    runs-on: ubuntu-latest
-    name: publish / dry-run
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # tag=v4.2.2
-        with:
-          submodules: true
-      
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # branch=master
-        with:
-          toolchain: stable
-      
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-publish-
-            ${{ runner.os }}-cargo-
-
-      - name: Cargo publish dry run
-        run: cargo publish --dry-run

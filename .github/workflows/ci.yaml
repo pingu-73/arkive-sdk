@@ -127,7 +127,7 @@ jobs:
           nigiri rpc generatetoaddress 405 $(nigiri rpc getnewaddress)
 
           echo "Running E2E tests..."
-          cargo test
+          cargo clean && cargo check && cargo test
         env:
           RUST_LOG: info,arkive=debug,e2e_tests=info
       

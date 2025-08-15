@@ -4,20 +4,27 @@ use crate::storage::vtxo_store::{VtxoState, VtxoTreeData};
 use crate::storage::{BoardingOutputState, BoardingStore};
 use crate::storage::{Storage, VtxoStore};
 use crate::types::{
-    Transaction, TransactionSource, TransactionStatus, TransactionType, VtxoInfo, VtxoStatus,
+    BatchSwapInfo, BatchSwapStatus, Transaction, TransactionSource, TransactionStatus,
+    TransactionType, VtxoInfo, VtxoStatus,
 };
 use crate::wallet::WalletConfig;
 
 use ark_client::{Blockchain, Client, ExplorerUtxo, OfflineClient, SpendStatus};
+use ark_core::batch::{
+    create_and_sign_forfeit_txs, generate_nonce_tree, sign_batch_tree, sign_commitment_psbt,
+    OnChainInput, VtxoInput,
+};
 use ark_core::coin_select::select_vtxos;
-use ark_core::redeem::{build_redeem_transaction, sign_redeem_transaction, VtxoInput};
-use ark_core::{ArkAddress, ArkTransaction};
+use ark_core::server::{GetVtxosRequest, Info, ListVtxo, VirtualTxOutPoint};
+use ark_core::UtxoCoinSelection;
+use ark_core::{ArkAddress, Vtxo};
 use bip39::rand::rngs::StdRng;
 use bip39::rand::SeedableRng;
 use bitcoin::key::Keypair;
-use bitcoin::{Amount, Network, Psbt};
+use bitcoin::{Amount, Network, OutPoint, Psbt};
 use chrono::{DateTime, Utc};
 use rusqlite::params;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Blockchain implementation for Esplora
@@ -123,6 +130,22 @@ impl Blockchain for EsploraBlockchain {
             .broadcast(tx)
             .await
             .map_err(|e| ark_client::Error::wallet(anyhow::anyhow!("Broadcast error: {}", e)))?;
+        Ok(())
+    }
+
+    async fn get_fee_rate(&self) -> std::result::Result<f64, ark_client::Error> {
+        // TODO: query the fee estimation API
+        Ok(10.0)
+    }
+
+    async fn broadcast_package(
+        &self,
+        txs: &[&bitcoin::Transaction],
+    ) -> std::result::Result<(), ark_client::Error> {
+        // Broadcast multiple tx in sequence
+        for tx in txs {
+            self.broadcast(tx).await?;
+        }
         Ok(())
     }
 }
@@ -269,6 +292,14 @@ impl ark_client::wallet::OnchainWallet for ArkWalletImpl {
             "Not implemented"
         )))
     }
+
+    fn select_coins(
+        &self,
+        _amount: Amount,
+    ) -> std::result::Result<UtxoCoinSelection, ark_client::Error> {
+        // TODO: Placeholder
+        todo!("to be implemented")
+    }
 }
 
 pub struct ArkService {
@@ -281,6 +312,10 @@ pub struct ArkService {
 }
 
 impl ArkService {
+    pub fn tx_manager(&self) -> &TransactionManager {
+        &self.tx_manager
+    }
+
     pub async fn new(
         keypair: Keypair,
         config: WalletConfig,
@@ -344,7 +379,11 @@ impl ArkService {
 
         // 1. Get available VTXOs
         let available_vtxos = self.get_spendable_vtxos().await?;
+        tracing::info!("Spendable VTXOs found: {}", available_vtxos.len());
+
         if available_vtxos.is_empty() {
+            tracing::error!("No spendable VTXOs found!");
+
             return Err(ArkiveError::InsufficientFunds {
                 need: amount.to_sat(),
                 available: 0,
@@ -354,8 +393,8 @@ impl ArkService {
         // 2. Select VTXOs for this transaction
         let vtxo_outpoints: Result<Vec<_>> = available_vtxos
             .iter()
-            .map(|v| -> Result<ark_core::coin_select::VtxoOutPoint> {
-                Ok(ark_core::coin_select::VtxoOutPoint {
+            .map(|v| -> Result<ark_core::coin_select::VirtualTxOutPoint> {
+                Ok(ark_core::coin_select::VirtualTxOutPoint {
                     outpoint: bitcoin::OutPoint::from_str(&v.outpoint)
                         .map_err(|e| ArkiveError::internal(format!("Invalid outpoint: {}", e)))?,
                     expire_at: v.expiry.timestamp(),
@@ -369,7 +408,7 @@ impl ArkService {
         let selected_outpoints = select_vtxos(
             vtxo_outpoints,
             amount,
-            Amount::from_sat(546), // dust limit
+            Amount::from_sat(333), // dust limit
             true,                  // allow change
         )
         .map_err(|e| ArkiveError::ark(format!("VTXO selection failed: {}", e)))?;
@@ -382,90 +421,19 @@ impl ArkService {
             });
         }
 
-        // 3. Build VTXO inputs
-        let vtxo_inputs: Vec<VtxoInput> = selected_outpoints
-            .iter()
-            .filter_map(|outpoint| {
-                available_vtxos
-                    .iter()
-                    .find(|v| v.outpoint == outpoint.outpoint.to_string())
-                    .map(|_vtxo_state| {
-                        // Create VTXO from stored state
-                        let secp = bitcoin::secp256k1::Secp256k1::new();
-                        let server_pk = client.server_info.pk.x_only_public_key().0;
-                        let (owner_pk, _) = self.keypair.x_only_public_key();
-
-                        let vtxo = ark_core::Vtxo::new_default(
-                            &secp,
-                            server_pk,
-                            owner_pk,
-                            client.server_info.unilateral_exit_delay,
-                            self.config.network,
-                        )
-                        .expect("Valid VTXO");
-
-                        VtxoInput::new(vtxo, outpoint.amount, outpoint.outpoint)
-                    })
-            })
-            .collect();
-
-        // 4. Create change address if needed
-        let change_amount = total_input - amount;
-        let change_address = if change_amount > Amount::from_sat(546) {
-            Some(self.get_address().await?)
-        } else {
-            None
-        };
-
-        // 5. Build redeem transaction
-        let mut redeem_psbt = build_redeem_transaction(
-            &[(&address, amount)],
-            change_address
-                .as_ref()
-                .map(|addr| ArkAddress::decode(addr).expect("Valid change address"))
-                .as_ref(),
-            &vtxo_inputs,
-        )
-        .map_err(|e| ArkiveError::ark(format!("Failed to build transaction: {}", e)))?;
-
-        // 6. Sign the transaction
-        let sign_fn = |msg: bitcoin::secp256k1::Message| -> std::result::Result<
-            (
-                bitcoin::secp256k1::schnorr::Signature,
-                bitcoin::XOnlyPublicKey,
-            ),
-            ark_core::Error,
-        > {
-            let secp = bitcoin::secp256k1::Secp256k1::new();
-            let sig = secp.sign_schnorr_no_aux_rand(&msg, &self.keypair);
-            let pk = self.keypair.x_only_public_key().0;
-            Ok((sig, pk))
-        };
-
-        for (i, _) in vtxo_inputs.iter().enumerate() {
-            sign_redeem_transaction(sign_fn, &mut redeem_psbt, &vtxo_inputs, i)
-                .map_err(|e| ArkiveError::ark(format!("Failed to sign transaction: {}", e)))?;
-        }
-
-        // 7. Submit to server
-        let signed_psbt = client
+        // 3. Submit tx, update vtxo, record tx
+        let txid = client
             .send_vtxo(address, amount)
             .await
             .map_err(|e| ArkiveError::ark(format!("Failed to submit transaction: {}", e)))?;
 
-        let tx = signed_psbt
-            .extract_tx()
-            .map_err(|e| ArkiveError::internal(format!("Failed to extract transaction: {}", e)))?;
-        let txid = tx.compute_txid().to_string();
-
-        // 8. Update VTXO states in storage
-        self.update_vtxo_states_after_send(&selected_outpoints, &txid)
+        let txid_str = txid.to_string();
+        self.update_vtxo_states_after_send(&selected_outpoints, &txid_str)
             .await?;
 
-        // 9. Record tx
         self.tx_manager
             .record_transaction_if_new(
-                &txid,
+                &txid_str,
                 -(amount.to_sat() as i64),
                 TransactionType::Ark,
                 TransactionSource::LocalRound,
@@ -475,48 +443,133 @@ impl ArkService {
         tracing::info!(
             "Sent {} sats via Ark transaction: {}",
             amount.to_sat(),
-            txid
+            txid_str
         );
-        Ok(txid)
+        Ok(txid_str)
+    }
+
+    pub async fn batch_swap(&self, vtxos_to_swap: Option<Vec<String>>) -> Result<Option<String>> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
+
+        // 1. Get VTXOs that need swapping
+        let vtxos_to_swap = if let Some(specific_vtxos) = vtxos_to_swap {
+            let all_vtxos = self.get_all_vtxos().await?;
+            all_vtxos
+                .into_iter()
+                .filter(|v| specific_vtxos.contains(&v.outpoint))
+                .collect()
+        } else {
+            let preconfirmed_vtxos = self.get_preconfirmed_vtxos().await?;
+            if !preconfirmed_vtxos.is_empty() {
+                preconfirmed_vtxos
+            } else {
+                self.get_expiring_vtxos(24).await?
+            }
+        };
+
+        if vtxos_to_swap.is_empty() {
+            tracing::info!("No VTXOs need batch swap");
+            return Ok(None);
+        }
+
+        tracing::info!("Initiating batch swap for {} VTXOs", vtxos_to_swap.len());
+
+        // 2. Create batch swap request
+        let swap_id = uuid::Uuid::new_v4().to_string();
+        let vtxo_outpoints: Vec<String> =
+            vtxos_to_swap.iter().map(|v| v.outpoint.clone()).collect();
+
+        let vtxo_store = VtxoStore::new(&self.storage);
+        let expires_at = Utc::now() + chrono::Duration::hours(2);
+        vtxo_store
+            .save_batch_swap(&self.wallet_id, &swap_id, &vtxo_outpoints, expires_at)
+            .await?;
+
+        // 3. Use v0.7 settle method for batch swap (this will include existing VTXOs)
+        let mut rng = StdRng::from_entropy();
+
+        match client.settle(&mut rng, true).await {
+            // true = include recoverable VTXOs
+            Ok(Some(commitment_txid)) => {
+                let txid_str = commitment_txid.to_string();
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                self.force_sync_with_server().await?;
+
+                vtxo_store
+                    .update_batch_swap_status(
+                        &self.wallet_id,
+                        &swap_id,
+                        BatchSwapStatus::Confirmed,
+                        Some(&txid_str),
+                    )
+                    .await?;
+
+                for vtxo in &vtxos_to_swap {
+                    vtxo_store
+                        .mark_vtxo_spent(&self.wallet_id, &vtxo.outpoint, Some(&swap_id), None)
+                        .await?;
+                }
+
+                tracing::info!("Batch swap completed successfully: {}", swap_id);
+                tracing::info!("Commitment transaction: {}", txid_str);
+                Ok(Some(swap_id))
+            }
+            Ok(None) => {
+                tracing::info!("No batch swap needed");
+                Ok(None)
+            }
+            Err(e) => {
+                vtxo_store
+                    .update_batch_swap_status(
+                        &self.wallet_id,
+                        &swap_id,
+                        BatchSwapStatus::Failed,
+                        None,
+                    )
+                    .await?;
+
+                Err(ArkiveError::ark(format!("Batch swap failed: {}", e)))
+            }
+        }
     }
 
     async fn get_spendable_vtxos(&self) -> Result<Vec<VtxoState>> {
         let vtxo_store = VtxoStore::new(&self.storage);
-        let all_vtxos = vtxo_store.load_vtxo_states(&self.wallet_id).await?;
+        vtxo_store.get_spendable_vtxos(&self.wallet_id).await
+    }
 
-        // Filter for spendable VTXOs (confirmed and not expired)
-        let now = Utc::now();
-        let spendable: Vec<VtxoState> = all_vtxos
-            .into_iter()
-            .filter(|vtxo| {
-                (matches!(vtxo.status, VtxoStatus::Confirmed)
-                    || matches!(vtxo.status, VtxoStatus::Pending))
-                    && vtxo.expiry > now
-            })
-            .collect();
+    /// Get preconfirmed VTXOs
+    async fn get_preconfirmed_vtxos(&self) -> Result<Vec<VtxoState>> {
+        let vtxo_store = VtxoStore::new(&self.storage);
+        vtxo_store.get_preconfirmed_vtxos(&self.wallet_id).await
+    }
 
-        Ok(spendable)
+    /// Get recoverable VTXOs
+    #[allow(dead_code)]
+    async fn get_recoverable_vtxos(&self) -> Result<Vec<VtxoState>> {
+        let vtxo_store = VtxoStore::new(&self.storage);
+        vtxo_store.get_recoverable_vtxos(&self.wallet_id).await
     }
 
     async fn update_vtxo_states_after_send(
         &self,
-        spent_outpoints: &[ark_core::coin_select::VtxoOutPoint],
+        spent_outpoints: &[ark_core::coin_select::VirtualTxOutPoint],
         txid: &str,
     ) -> Result<()> {
         let vtxo_store = VtxoStore::new(&self.storage);
 
         for outpoint in spent_outpoints {
-            // Mark VTXO as spent
-            let mut vtxo_state = vtxo_store
-                .load_vtxo_states(&self.wallet_id)
-                .await?
-                .into_iter()
-                .find(|v| v.outpoint == outpoint.outpoint.to_string())
-                .ok_or_else(|| ArkiveError::internal("VTXO not found in storage"))?;
-
-            vtxo_state.status = VtxoStatus::Spent;
             vtxo_store
-                .save_vtxo_state(&self.wallet_id, &vtxo_state)
+                .mark_vtxo_spent(
+                    &self.wallet_id,
+                    &outpoint.outpoint.to_string(),
+                    Some(txid),
+                    Some(txid),
+                )
                 .await?;
         }
 
@@ -534,159 +587,139 @@ impl ArkService {
             .as_ref()
             .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
 
-        // Sync to detect any new boarding outputs
-        self.detect_and_store_boarding_outputs().await?;
+        // 1. Check for preconfirmed VTXOs first
+        let preconfirmed_vtxos = self.get_preconfirmed_vtxos().await?;
+        if !preconfirmed_vtxos.is_empty() {
+            tracing::info!(
+                "Found {} preconfirmed VTXOs, initiating batch swap",
+                preconfirmed_vtxos.len()
+            );
+            return self.batch_swap(None).await;
+        }
 
-        // Get spendable VTXOs and boarding outputs
-        let vtxos = self.get_spendable_vtxos().await?;
+        // 2. Check for boarding outputs
+        self.detect_and_store_boarding_outputs().await?;
         let boarding_store = BoardingStore::new(&self.storage);
         let boarding_states = boarding_store
             .load_unspent_boarding_outputs(&self.wallet_id)
             .await?;
 
-        if vtxos.is_empty() && boarding_states.is_empty() {
-            tracing::info!("No VTXOs or boarding outputs to settle");
+        if boarding_states.is_empty() {
+            tracing::info!("No boarding outputs or preconfirmed VTXOs to process");
             return Ok(None);
         }
 
         tracing::info!(
-            "Participating in round with {} VTXOs and {} boarding outputs",
-            vtxos.len(),
+            "Found {} boarding outputs to process",
             boarding_states.len()
         );
 
-        // Validate boarding outputs before participating
-        let mut valid_boarding_count = 0;
-        for state in &boarding_states {
-            if let Ok(boarding_output) = state.to_boarding_output(self.config.network) {
-                if boarding_output.address().to_string() == state.address {
-                    valid_boarding_count += 1;
-                } else {
-                    tracing::error!("Invalid boarding output detected: {}", state.outpoint);
-                    tracing::error!(
-                        "  Address mismatch - stored: {}, recreated: {}",
-                        state.address,
-                        boarding_output.address()
-                    );
-                }
-            }
-        }
-
-        if valid_boarding_count == 0 && vtxos.is_empty() {
-            return Err(ArkiveError::internal(
-                "No valid boarding outputs or VTXOs found",
-            ));
-        }
-
+        // 3. Use the proper v0.7 settle method
         let mut rng = StdRng::from_entropy();
 
-        // Retry logic with exponential backoff
-        for attempt in 1..=3 {
-            tracing::info!("Round participation attempt {}", attempt);
+        match client.settle(&mut rng, false).await {
+            // false = don't include recoverable VTXOs
+            Ok(Some(commitment_txid)) => {
+                let round_id = format!("round_{}", chrono::Utc::now().timestamp());
+                let txid_str = commitment_txid.to_string();
 
-            match client.board(&mut rng).await {
-                Ok(_) => {
-                    let round_id = format!("round_{}", chrono::Utc::now().timestamp());
+                // Wait for settlement to complete
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-                    // Wait for server processing
-                    let wait_time = std::cmp::min(5 + (attempt - 1) * 2, 10);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(wait_time)).await;
+                // Sync to get new VTXOs
+                self.force_sync_with_server().await?;
 
-                    // Sync to get new VTXOs
-                    self.force_sync_with_server().await?;
+                let new_vtxos = self.get_spendable_vtxos().await?;
 
-                    let new_vtxos = self.get_spendable_vtxos().await?;
+                if !new_vtxos.is_empty() {
+                    // Mark boarding outputs as spent
+                    let boarding_outpoints: Vec<bitcoin::OutPoint> =
+                        boarding_states.iter().map(|s| s.outpoint).collect();
 
-                    if !new_vtxos.is_empty() {
-                        // Mark boarding outputs as spent with round tracking
-                        let boarding_outpoints: Vec<bitcoin::OutPoint> =
-                            boarding_states.iter().map(|s| s.outpoint).collect();
+                    self.tx_manager
+                        .mark_boarding_outputs_spent(&boarding_outpoints, &round_id)
+                        .await?;
 
-                        self.tx_manager
-                            .mark_boarding_outputs_spent(&boarding_outpoints, &round_id)
+                    for state in &boarding_states {
+                        boarding_store
+                            .mark_boarding_output_spent(&self.wallet_id, &state.outpoint)
                             .await?;
-
-                        // Mark boarding outputs as spent in storage
-                        for state in &boarding_states {
-                            boarding_store
-                                .mark_boarding_output_spent(&self.wallet_id, &state.outpoint)
-                                .await?;
-                        }
-
-                        tracing::info!("Successfully participated in round: {}", round_id);
-                        return Ok(Some(round_id));
                     }
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    if error_msg.contains("No boarding outputs")
-                        || error_msg.contains("No VTXOs")
-                        || error_msg.contains("no inputs")
-                    {
-                        tracing::info!("No round participation needed: {}", error_msg);
-                        return Ok(None);
-                    } else if attempt < 3 {
-                        tracing::warn!("Round participation failed (attempt {}): {}", attempt, e);
-                        let backoff = 2_u64.pow((attempt - 1) as u32);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
-                        continue;
-                    } else {
-                        return Err(ArkiveError::ark(format!(
-                            "Round participation failed after {} attempts: {}",
-                            attempt, e
-                        )));
-                    }
+
+                    tracing::info!("Successfully participated in round: {}", round_id);
+                    tracing::info!("Commitment transaction: {}", txid_str);
+                    Ok(Some(round_id))
+                } else {
+                    tracing::warn!("Settlement completed but no new VTXOs found");
+                    Ok(Some(round_id))
                 }
             }
+            Ok(None) => {
+                tracing::info!("No settlement needed - no inputs to process");
+                Ok(None)
+            }
+            Err(e) => {
+                tracing::error!("Settlement failed: {}", e);
+                Err(ArkiveError::ark(format!("Settlement failed: {}", e)))
+            }
         }
-
-        unreachable!("Loop always returns")
     }
 
-    async fn force_sync_with_server(&self) -> Result<()> {
+    pub async fn force_sync_with_server(&self) -> Result<()> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| ArkiveError::internal("Ark server not connected"))?;
 
-        // Get current VTXOs from server
-        let server_vtxos = client
-            .spendable_vtxos()
+        // 1. Get current VTXOs from server using v0.7 APIs
+        let ark_address = self.get_address().await?;
+        let _address = ArkAddress::decode(&ark_address)?;
+
+        let list_vtxo = client
+            .list_vtxos(true)
             .await
             .map_err(|e| ArkiveError::ark(format!("Failed to get VTXOs from server: {}", e)))?;
 
-        // Update local VTXO storage
+        // 2. Process spendable VTXOs
         let vtxo_store = VtxoStore::new(&self.storage);
-
-        // Get existing VTXOs to avoid duplicates
         let existing_vtxos = self.get_all_vtxos().await?;
         let existing_outpoints: std::collections::HashSet<String> =
             existing_vtxos.iter().map(|v| v.outpoint.clone()).collect();
 
-        // Process server VTXOs
         let mut new_vtxo_count = 0;
-        for (outpoints, vtxo) in server_vtxos {
-            for outpoint in outpoints {
-                // Skip if we already have this VTXO
-                if existing_outpoints.contains(&outpoint.outpoint.to_string()) {
+
+        // Process spendable VTXOs
+        for (vtxo_outpoints, _vtxo) in &list_vtxo.spendable {
+            for vtxo_outpoint in vtxo_outpoints {
+                if existing_outpoints.contains(&vtxo_outpoint.outpoint.to_string()) {
                     continue;
                 }
 
-                let vtxo_state = VtxoState {
-                    outpoint: outpoint.outpoint.to_string(),
-                    amount: outpoint.amount,
-                    status: if outpoint.is_pending {
-                        VtxoStatus::Pending
-                    } else {
-                        VtxoStatus::Confirmed
-                    },
-                    expiry: chrono::DateTime::from_timestamp(outpoint.expire_at, 0)
-                        .unwrap_or_else(Utc::now),
-                    address: vtxo.address().to_string(),
-                    batch_id: format!("batch_{}", outpoint.expire_at),
-                    tree_path: Vec::new(), // [TODO] Extract from VTXO tree
-                    exit_transactions: Vec::new(), // [TODO] Store exit transactions
-                };
+                let vtxo_state = self.virtual_outpoint_to_vtxo_state(vtxo_outpoint).await?;
+                vtxo_store
+                    .save_vtxo_state(&self.wallet_id, &vtxo_state)
+                    .await?;
+
+                new_vtxo_count += 1;
+                tracing::info!(
+                    "Added new spendable VTXO: {} with {} sats (preconfirmed: {})",
+                    vtxo_state.outpoint,
+                    vtxo_state.amount.to_sat(),
+                    vtxo_state.is_preconfirmed
+                );
+            }
+        }
+
+        // Process recoverable VTXOs
+        for (vtxo_outpoints, _vtxo) in list_vtxo.spent.iter() {
+            for vtxo_outpoint in vtxo_outpoints.iter().filter(|v| v.is_recoverable()) {
+                if existing_outpoints.contains(&vtxo_outpoint.outpoint.to_string()) {
+                    continue;
+                }
+
+                let mut vtxo_state = self.virtual_outpoint_to_vtxo_state(vtxo_outpoint).await?;
+                vtxo_state.is_recoverable = true;
+                vtxo_state.status = VtxoStatus::Spent;
 
                 vtxo_store
                     .save_vtxo_state(&self.wallet_id, &vtxo_state)
@@ -694,50 +727,67 @@ impl ArkService {
 
                 new_vtxo_count += 1;
                 tracing::info!(
-                    "Added new VTXO from server: {} with {} sats (status: {:?})",
+                    "Added new recoverable VTXO: {} with {} sats",
                     vtxo_state.outpoint,
-                    vtxo_state.amount.to_sat(),
-                    vtxo_state.status
+                    vtxo_state.amount.to_sat()
                 );
             }
         }
 
-        tracing::info!(
-            "Added {} new VTXOs from server during force sync",
-            new_vtxo_count
-        );
+        tracing::info!("Added {} new VTXOs from server during sync", new_vtxo_count);
 
-        // Update tx history
-        // Get tx history from server
-        let history = client
-            .transaction_history()
-            .await
-            .map_err(|e| ArkiveError::ark(format!("Failed to get transaction history: {}", e)))?;
-
-        // Only record new tx
-        for tx in history {
-            let (txid, amount, tx_type) = match tx {
-                ArkTransaction::Boarding { txid, amount, .. } => (
-                    txid.to_string(),
-                    amount.to_sat() as i64,
-                    TransactionType::Boarding,
-                ),
-                ArkTransaction::Round { txid, amount, .. } => {
-                    (txid.to_string(), amount.to_sat(), TransactionType::Ark)
-                }
-                ArkTransaction::Redeem { txid, amount, .. } => {
-                    (txid.to_string(), amount.to_sat(), TransactionType::Ark)
-                }
-            };
-
-            // Only record if new
-            self.tx_manager
-                .record_transaction_if_new(&txid, amount, tx_type, TransactionSource::ArkServer)
-                .await?;
-        }
-
-        tracing::info!("Sync completed - preserved existing transaction states");
         Ok(())
+    }
+
+    /// Convert VirtualTxOutPoint to VtxoState (issues with expiry calculation)
+    async fn virtual_outpoint_to_vtxo_state(
+        &self,
+        vtxo_outpoint: &VirtualTxOutPoint,
+    ) -> Result<VtxoState> {
+        let status = if vtxo_outpoint.is_preconfirmed {
+            VtxoStatus::Preconfirmed
+        } else if vtxo_outpoint.is_spent {
+            VtxoStatus::Spent
+        } else {
+            VtxoStatus::Confirmed
+        };
+
+        // Fix expiry calculation - expires_at is likely a duration from creation, not absolute timestamp
+        let expiry = if vtxo_outpoint.expires_at < 1_000_000_000 {
+            // If it's a small number, treat it as seconds from now
+            Utc::now() + chrono::Duration::seconds(vtxo_outpoint.expires_at)
+        } else {
+            // If it's a large number, treat it as a timestamp
+            DateTime::from_timestamp(vtxo_outpoint.expires_at, 0).unwrap_or_else(|| {
+                // Fallback: use server's vtxo_tree_expiry
+                let client = self.client.as_ref().unwrap();
+                let expiry_seconds = client.server_info.vtxo_tree_expiry.to_consensus_u32() as i64;
+                Utc::now() + chrono::Duration::seconds(expiry_seconds)
+            })
+        };
+
+        Ok(VtxoState {
+            outpoint: vtxo_outpoint.outpoint.to_string(),
+            amount: vtxo_outpoint.amount,
+            status,
+            expiry,
+            address: bitcoin::Address::from_script(&vtxo_outpoint.script, self.config.network)
+                .map_err(|e| ArkiveError::internal(format!("Invalid script: {}", e)))?
+                .to_string(),
+            batch_id: format!("batch_{}", vtxo_outpoint.expires_at),
+            tree_path: Vec::new(),
+            exit_transactions: Vec::new(),
+            is_preconfirmed: vtxo_outpoint.is_preconfirmed,
+            is_recoverable: vtxo_outpoint.is_recoverable(),
+            commitment_txids: vtxo_outpoint
+                .commitment_txids
+                .iter()
+                .map(|txid| txid.to_string())
+                .collect(),
+            spent_by: vtxo_outpoint.spent_by.map(|txid| txid.to_string()),
+            settled_by: vtxo_outpoint.settled_by.map(|txid| txid.to_string()),
+            ark_txid: vtxo_outpoint.ark_txid.map(|txid| txid.to_string()),
+        })
     }
 
     async fn detect_and_store_boarding_outputs(&self) -> Result<()> {
@@ -767,21 +817,14 @@ impl ArkService {
                 let server_pk = client.server_info.pk.x_only_public_key().0;
                 let (user_pk, _) = self.keypair.x_only_public_key();
 
-                // CRITICAL: Use the SAME exit delay that the server used to create the boarding address
-                // This should match what's in the boarding descriptor template
                 let exit_delay = client.server_info.boarding_exit_delay.to_consensus_u32();
-
-                tracing::info!(
-                    "Using exit delay from server info: {} (not hardcoded value)",
-                    exit_delay
-                );
 
                 let boarding_state = BoardingOutputState {
                     outpoint: utxo.outpoint,
                     amount: utxo.amount,
                     address: boarding_address.clone(),
                     script_pubkey: address.script_pubkey().to_hex_string(),
-                    exit_delay, // Use server's unilateral exit delay, not boarding exit delay
+                    exit_delay,
                     server_pubkey: server_pk.to_string(),
                     user_pubkey: user_pk.to_string(),
                     confirmation_blocktime: utxo
@@ -805,10 +848,9 @@ impl ArkService {
                     .await?;
 
                 tracing::info!(
-                    "Detected and stored boarding output: {} with {} sats (exit_delay: {})",
+                    "Detected and stored boarding output: {} with {} sats",
                     utxo.outpoint,
-                    utxo.amount.to_sat(),
-                    boarding_state.exit_delay
+                    utxo.amount.to_sat()
                 );
             }
         }
@@ -827,7 +869,6 @@ impl ArkService {
 
     pub async fn get_balance(&self) -> Result<(Amount, Amount)> {
         if let Some(client) = &self.client {
-            // Get balance from server
             match client.offchain_balance().await {
                 Ok(balance) => {
                     tracing::info!(
@@ -836,7 +877,6 @@ impl ArkService {
                         balance.pending().to_sat()
                     );
 
-                    // Fall back to local, If server reports 0 balance but we have local VTXOs
                     if balance.confirmed().to_sat() == 0 && balance.pending().to_sat() == 0 {
                         let local_balance = self.calculate_local_balance().await?;
                         if local_balance.0.to_sat() > 0 || local_balance.1.to_sat() > 0 {
@@ -868,8 +908,15 @@ impl ArkService {
         for vtxo in vtxos {
             match vtxo.status {
                 VtxoStatus::Confirmed => confirmed += vtxo.amount,
-                VtxoStatus::Pending => pending += vtxo.amount,
-                _ => {} // Skip spent/expired
+                VtxoStatus::Preconfirmed | VtxoStatus::Unconfirmed | VtxoStatus::Pending => {
+                    pending += vtxo.amount
+                }
+                _ => {} // Skip spent/expired/replaced
+            }
+
+            // Add recoverable VTXOs to confirmed balance
+            if vtxo.is_recoverable && !matches!(vtxo.status, VtxoStatus::Replaced) {
+                confirmed += vtxo.amount;
             }
         }
 
@@ -892,6 +939,10 @@ impl ArkService {
                 status: vtxo.status,
                 expiry: vtxo.expiry,
                 address: vtxo.address,
+                is_preconfirmed: vtxo.is_preconfirmed,
+                is_recoverable: vtxo.is_recoverable,
+                batch_id: Some(vtxo.batch_id),
+                commitment_txids: vtxo.commitment_txids,
             })
             .collect();
 
@@ -902,7 +953,7 @@ impl ArkService {
         let conn = self.storage.get_connection().await;
 
         let mut stmt = conn.prepare(
-            "SELECT txid, amount, timestamp, tx_type, status, fee, source, ark_round_id
+            "SELECT txid, amount, timestamp, tx_type, status, fee, source, ark_round_id, batch_swap_id
              FROM transactions 
              WHERE wallet_id = ?1 
              ORDER BY timestamp DESC",
@@ -958,7 +1009,6 @@ impl ArkService {
     }
 
     pub async fn estimate_fee(&self, amount: Amount) -> Result<Amount> {
-        // Ark transaction fees are typically very low
         let base_fee = Amount::from_sat(100); // 100 sats base
         let amount_fee = Amount::from_sat(amount.to_sat() / 10000); // 0.01% of amount
         Ok(base_fee + amount_fee)
@@ -1027,6 +1077,129 @@ impl ArkService {
         vtxo_store
             .get_expiring_vtxos(&self.wallet_id, hours_threshold)
             .await
+    }
+
+    /// Get batch swap information
+    pub async fn get_batch_swap_info(&self, swap_id: &str) -> Result<Option<BatchSwapInfo>> {
+        let conn = self.storage.get_connection().await;
+
+        let result = conn.query_row(
+            "SELECT swap_id, status, input_vtxos, output_vtxos, commitment_txid, created_at, expires_at
+             FROM batch_swaps WHERE wallet_id = ?1 AND swap_id = ?2",
+            params![self.wallet_id, swap_id],
+            |row| {
+                let status_str: String = row.get(1)?;
+                let input_vtxos_str: String = row.get(2)?;
+                let output_vtxos_str: Option<String> = row.get(3)?;
+
+                let status: BatchSwapStatus = serde_json::from_str(&status_str).map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        1,
+                        "status".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+
+                let input_vtxos: Vec<String> = serde_json::from_str(&input_vtxos_str).map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        2,
+                        "input_vtxos".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+
+                let output_vtxos: Vec<String> = if let Some(output_str) = output_vtxos_str {
+                    serde_json::from_str(&output_str).map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            3,
+                            "output_vtxos".to_string(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?
+                } else {
+                    Vec::new()
+                };
+
+                Ok(BatchSwapInfo {
+                    swap_id: row.get(0)?,
+                    status,
+                    input_vtxos,
+                    output_vtxos,
+                    commitment_txid: row.get(4)?,
+                    created_at: DateTime::from_timestamp(row.get::<_, i64>(5)?, 0)
+                        .unwrap_or_else(Utc::now),
+                    expires_at: DateTime::from_timestamp(row.get::<_, i64>(6)?, 0)
+                        .unwrap_or_else(Utc::now),
+                })
+            },
+        );
+
+        match result {
+            Ok(info) => Ok(Some(info)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(ArkiveError::Storage(e)),
+        }
+    }
+
+    /// List all batch swaps
+    pub async fn list_batch_swaps(&self) -> Result<Vec<BatchSwapInfo>> {
+        let conn = self.storage.get_connection().await;
+
+        let mut stmt = conn.prepare(
+            "SELECT swap_id, status, input_vtxos, output_vtxos, commitment_txid, created_at, expires_at
+             FROM batch_swaps WHERE wallet_id = ?1 ORDER BY created_at DESC",
+        )?;
+
+        let swaps = stmt
+            .query_map([&self.wallet_id], |row| {
+                let status_str: String = row.get(1)?;
+                let input_vtxos_str: String = row.get(2)?;
+                let output_vtxos_str: Option<String> = row.get(3)?;
+
+                let status: BatchSwapStatus = serde_json::from_str(&status_str).map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        1,
+                        "status".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+
+                let input_vtxos: Vec<String> =
+                    serde_json::from_str(&input_vtxos_str).map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            2,
+                            "input_vtxos".to_string(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?;
+
+                let output_vtxos: Vec<String> = if let Some(output_str) = output_vtxos_str {
+                    serde_json::from_str(&output_str).map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            3,
+                            "output_vtxos".to_string(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?
+                } else {
+                    Vec::new()
+                };
+
+                Ok(BatchSwapInfo {
+                    swap_id: row.get(0)?,
+                    status,
+                    input_vtxos,
+                    output_vtxos,
+                    commitment_txid: row.get(4)?,
+                    created_at: DateTime::from_timestamp(row.get::<_, i64>(5)?, 0)
+                        .unwrap_or_else(Utc::now),
+                    expires_at: DateTime::from_timestamp(row.get::<_, i64>(6)?, 0)
+                        .unwrap_or_else(Utc::now),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(swaps)
     }
 }
 
@@ -1141,7 +1314,7 @@ impl TransactionManager {
         let conn = self.storage.get_connection().await;
 
         let mut stmt = conn.prepare(
-            "SELECT txid, amount, timestamp, tx_type, status, fee, source, ark_round_id
+            "SELECT txid, amount, timestamp, tx_type, status, fee, source, ark_round_id, batch_swap_id
              FROM transactions 
              WHERE wallet_id = ?1 AND tx_type = ?2
              ORDER BY timestamp DESC",

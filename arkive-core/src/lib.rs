@@ -7,12 +7,14 @@ pub mod ark;
 pub mod backup;
 pub mod bitcoin;
 pub mod error;
+pub mod games;
 pub mod storage;
 pub mod sync;
 pub mod types;
 pub mod wallet;
 
 pub use error::{ArkiveError, Result};
+pub use games::*;
 pub use types::{Address, Balance, Transaction};
 pub use wallet::{ArkWallet, WalletConfig, WalletManager};
 

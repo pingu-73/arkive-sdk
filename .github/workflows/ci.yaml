@@ -1,0 +1,136 @@
+name: ci
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    name: nightly / fmt
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # tag=v4.2.2
+        with:
+          submodules: true
+      - name: Install nightly
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # branch=master
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --check
+    
+  clippy:
+    runs-on: ubuntu-latest
+    name: ${{ matrix.toolchain }} / clippy
+    permissions:
+      contents: read
+      checks: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Get early warning of new lints which are regularly introduced in beta channels and nightly.
+        toolchain: [stable, beta, nightly]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # tag=v4.2.2
+        with:
+          submodules: true
+      - name: Install ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # branch=master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - name: cargo clippy
+        uses: giraffate/clippy-action@13b9d32482f25d29ead141b79e7e04e7900281e0 # tag=v1.0.1
+        with:
+          reporter: 'github-pr-check'
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+  
+  e2e-tests:
+    runs-on: ubuntu-latest
+    name: ${{ matrix.toolchain }} / e2e-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable]
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # tag=v4.2.2
+        with:
+          submodules: true
+      
+      - name: Install ${{ matrix.toolchain }} Rust
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # branch=master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-e2e-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-e2e-${{ matrix.toolchain }}-
+            ${{ runner.os }}-cargo-e2e-
+            ${{ runner.os }}-cargo-
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        # uses: docker/setup-docker-desktop@v1
+        # with:
+        #   version: latest
+
+      - name: Install Nigiri
+        run: |
+          curl https://getnigiri.vulpem.com | bash
+          echo "$HOME/.nigiri" >> $GITHUB_PATH
+      
+      - name: Start Nigiri with Ark
+        run: |
+          nigiri start --ark
+      
+      - name: Verify services are running
+        run: |
+          echo "Checking Bitcoin node..."
+          nigiri rpc getblockchaininfo
+          echo "Checking Ark server..."
+          curl -s --retry 2 --retry-delay 5 --retry-connrefused http://localhost:7070/v1/info | jq '.'
+          echo "Services verified!"
+
+      - name: Run E2E tests
+        run: |
+          echo "Nigiri Setup"
+          nigiri stop --delete
+          nigiri start --ark
+          admin_wallet=$(curl -s http://localhost:7070/v1/admin/wallet/address | jq -r '.address')
+          forfeit_address=$(curl -s http://localhost:7070/v1/info | jq -r '.forfeitAddress')
+          nigiri rpc generatetoaddress 708 $(nigiri rpc getnewaddress)
+          nigiri faucet $forfeit_address 200; nigiri faucet $admin_wallet 200
+          nigiri rpc generatetoaddress 405 $(nigiri rpc getnewaddress)
+
+          echo "Running E2E tests..."
+          cargo clean; cargo build --release; cargo test
+        env:
+          RUST_LOG: info,arkive=debug,e2e_tests=info
+      
+      - name: Stop Nigiri
+        if: always()
+        run: |
+          nigiri stop

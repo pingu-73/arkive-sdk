@@ -48,6 +48,9 @@ pub enum ArkiveError {
 
     #[error("Dialog error: {0}")]
     Dialog(String),
+
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl From<ark_core::Error> for ArkiveError {
@@ -88,11 +91,35 @@ impl ArkiveError {
     pub fn dialog(msg: impl Into<String>) -> Self {
         Self::Dialog(msg.into())
     }
+
+    pub fn invalid_input(msg: impl Into<String>) -> Self {
+        Self::InvalidInput(msg.into())
+    }
 }
 
 // conversion from dialoguer::Error
 impl From<dialoguer::Error> for ArkiveError {
     fn from(err: dialoguer::Error) -> Self {
         ArkiveError::Dialog(err.to_string())
+    }
+}
+
+impl From<bitcoin::psbt::Error> for ArkiveError {
+    fn from(err: bitcoin::psbt::Error) -> Self {
+        ArkiveError::Bitcoin(err.to_string())
+    }
+}
+
+// remove
+impl From<bitcoin::hex::HexToArrayError> for ArkiveError {
+    fn from(err: bitcoin::hex::HexToArrayError) -> Self {
+        ArkiveError::Bitcoin(err.to_string())
+    }
+}
+
+// Add this for OutPoint parsing errors
+impl From<bitcoin::consensus::encode::Error> for ArkiveError {
+    fn from(err: bitcoin::consensus::encode::Error) -> Self {
+        ArkiveError::Bitcoin(err.to_string())
     }
 }

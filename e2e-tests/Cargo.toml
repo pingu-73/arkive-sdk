@@ -1,0 +1,30 @@
+[package]
+name = "e2e-tests"
+version = "0.1.0"
+edition = "2021"
+description = "End-to-end tests for ARKive SDK"
+publish = false
+
+[dependencies]
+arkive-core = { path = "../arkive-core" }
+
+tokio = { workspace = true, features = ["full", "test-util", "rt-multi-thread"] }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+bitcoin = { workspace = true }
+
+tempfile = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+reqwest = { workspace = true }
+
+serial_test = "3.0"
+
+
+[lib]
+test = false
+
+[[test]]
+name = "e2e-ark-tx"
+path = "tests/e2e-ark-tx.rs"

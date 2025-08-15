@@ -48,6 +48,10 @@ enum Commands {
     /// Multi-device sync commands
     #[command(subcommand)]
     Sync(commands::SyncCommands),
+
+    /// Gaming commands
+    #[command(subcommand)]
+    Game(commands::GameCommands),
 }
 
 #[tokio::main]
@@ -85,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Ark(cmd) => commands::handle_ark_command(cmd, &manager).await,
         Commands::Backup(cmd) => commands::handle_backup_command(cmd, &manager).await,
         Commands::Sync(cmd) => commands::handle_sync_command(cmd, &manager).await,
+        Commands::Game(cmd) => commands::handle_game_command(cmd, &manager).await,
     };
 
     if let Err(e) = result {

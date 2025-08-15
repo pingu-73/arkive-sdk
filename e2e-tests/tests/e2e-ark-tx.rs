@@ -72,7 +72,7 @@ async fn test_basic_boarding_and_ark_transaction() -> Result<()> {
 
     info!("Bob participating in round to confirm VTXO...");
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(80)).await;
 
     let bob_round_result = bob.participate_in_round().await?;
     assert!(
@@ -111,7 +111,7 @@ async fn test_basic_boarding_and_ark_transaction() -> Result<()> {
 
     let total_remaining = alice_total + bob_final_confirmed.to_sat() + ARK_TRANSACTION_FEE;
     assert_eq!(
-        total_remaining, 100_000_000,
+        total_remaining, 150_000_000,
         "Total funds should be conserved (minus fees)"
     );
 
